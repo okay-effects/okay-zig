@@ -89,7 +89,9 @@ For the effects whose rest is taken many times (choice, backtracking), `ok.resum
 no machine: a program is a `union(enum)` of its stops, each holding its live variables, and `step(self, answer)`
 goes to the next stop. Zig copies a union by value, so a handler resumes the rest as often as it wants — every path of
 a choice among 1000 in 0.38 µs, against 29 µs through the machine (`zig build lanes -Doptimize=ReleaseFast`). The
-states are written by hand: the shape Rust's `#[resumable]` and Goose's okgc generate.
+states are written by hand: the shape Rust's `#[resumable]` and Goose's okgc generate. On the wire,
+`wire.served(K, "pairs", start)` serves one: the worker keeps each rest as a copy, and the host continues it as many
+times as it wants.
 
 ## The family's TCK
 

@@ -20,7 +20,8 @@ export fn okay_exchange(req: [*]const u8, len: usize, out_len: *usize) [*]u8 {
     defer lock.unlock();
     const w = if (worker) |*w| w else blk: {
         threaded = .init(gpa, .{});
-        worker = ok.wire.Worker.init(gpa, &programs.programs).withDirect(threaded.io(), &programs.direct);
+        worker = ok.wire.Worker.init(gpa, &programs.programs).withDirect(threaded.io(), &programs.direct)
+            .withResumable(&programs.resumables);
         break :blk &worker.?;
     };
     const out = if (len == 0)

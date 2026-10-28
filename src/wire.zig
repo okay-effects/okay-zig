@@ -350,6 +350,73 @@ pub fn guard(b: *Build, comptime E: type, p: anytype, g: anytype) @TypeOf(p) {
     return b.intercept(E, p, H{ .g = g });
 }
 
+// ------------------------------------------------------------------------------------------------ resumable programs
+
+const rsm = @import("resumable.zig");
+
+/// a resumable program's rest, as the worker keeps it: a copy in the run's arena, and how to step it — each
+/// resumption steps a COPY of the kept one, so the host resumes it as many times as it wants, with no machine
+const Kept = struct {
+    k: *const anyopaque,
+    step: *const fn (a: Allocator, k: *const anyopaque, reply: Host.Reply) Outcome,
+};
+
+/// a resumable program stepped as far as the host must answer
+const Outcome = union(enum) {
+    done: Value,
+    perform: struct { name: []const u8, args: []const Value, rest: Kept },
+    failed: Condition,
+};
+
+/// A RESUMABLE PROGRAM THE HOST STARTS BY NAME: `start(arena, args)` its first step
+pub const ResumableEntry = struct { name: []const u8, start: *const fn (a: Allocator, args: []const Value) Outcome };
+
+/// the resumable program `K` served as `name`, started by `start(arena, args) !Step(K)`: each operation sent to the
+/// host by its tag's name, its payload the arguments (a struct's fields each one), the host's answer decoded as
+/// `K.Answer` (`TypeError` if it is not one), its value encoded; an error of `start` a condition by its name
+pub fn served(
+    comptime K: type,
+    comptime name: []const u8,
+    comptime start: fn (a: Allocator, args: []const Value) anyerror!rsm.Step(K),
+) ResumableEntry {
+    comptime rsm.check(K);
+    const E = struct {
+        fn outcome(a: Allocator, s: rsm.Step(K)) Outcome {
+            switch (s) {
+                .done => |v| return .{ .done = encode(a, K.Out, v) },
+                .perform => |p| {
+                    const keep = a.create(K) catch oom();
+                    keep.* = p.k;
+                    switch (p.op) {
+                        inline else => |payload, tag| return .{ .perform = .{
+                            .name = @tagName(tag),
+                            .args = arguments(a, payload),
+                            .rest = .{ .k = keep, .step = stepped },
+                        } },
+                    }
+                },
+            }
+        }
+        fn stepped(a: Allocator, k: *const anyopaque, reply: Host.Reply) Outcome {
+            const rest: K = @as(*const K, @ptrCast(@alignCast(k))).*; // a copy: the kept one stays for another time
+            const v = switch (reply) {
+                .ok => |x| x,
+                .failed => |c| return .{ .failed = c },
+            };
+            const answer = decode(K.Answer, v) orelse return .{ .failed = .{
+                .kind = "TypeError",
+                .message = "the host's answer is not a " ++ @typeName(K.Answer),
+            } };
+            return outcome(a, rest.step(answer));
+        }
+        fn started(a: Allocator, args: []const Value) Outcome {
+            const first = start(a, args) catch |e| return .{ .failed = .{ .kind = @errorName(e), .message = "" } };
+            return outcome(a, first);
+        }
+    };
+    return .{ .name = name, .start = E.started };
+}
+
 // ------------------------------------------------------------------------------------------------ the worker
 
 /// a program stepped as far as the host must answer: its value, an operation with its rest, or its failure
@@ -586,6 +653,8 @@ const Run = struct {
     arena: std.heap.ArenaAllocator,
     b: Build,
     rests: std.AutoHashMapUnmanaged(u64, *const ok.Captured) = .empty,
+    /// a resumable program's rests: copies, stepped as copies
+    kept: std.AutoHashMapUnmanaged(u64, Kept) = .empty,
     next: u64 = 0,
 
     fn make(gpa: Allocator) *Run {
@@ -607,6 +676,8 @@ const Held = struct { arena: std.heap.ArenaAllocator, value: Value };
 pub const Worker = struct {
     gpa: Allocator,
     programs: []const Entry,
+    /// resumable programs, their rests kept as copies: `withResumable`
+    resumables: []const ResumableEntry = &.{},
     /// functions in direct style, each call a task of `io`: `withDirect`
     direct: []const DirectEntry = &.{},
     io: ?std.Io = null,
@@ -623,6 +694,8 @@ pub const Worker = struct {
     outflows: std.AutoHashMapUnmanaged(i64, *Parked) = .empty,
     inflows: std.AutoHashMapUnmanaged(i64, *Parked) = .empty,
     streamed: std.ArrayList(*Parked) = .empty,
+    /// the requests being answered (mux): what the end of the input waits for
+    inflight: std.atomic.Value(usize) = .init(0),
 
     pub fn init(gpa: Allocator, programs: []const Entry) Worker {
         return .{ .gpa = gpa, .programs = programs };
@@ -634,6 +707,42 @@ pub const Worker = struct {
         out.io = io;
         out.direct = direct;
         return out;
+    }
+
+    /// the same worker serving `resumables` too: programs whose rest is a value, resumed with no machine
+    pub fn withResumable(w: Worker, resumables: []const ResumableEntry) Worker {
+        var out = w;
+        out.resumables = resumables;
+        return out;
+    }
+
+    /// a resumable program by its name, or by `module:name`
+    pub fn findResumable(w: *const Worker, name: []const u8) ?ResumableEntry {
+        const bare = if (std.mem.indexOfScalar(u8, name, ':')) |i| name[i + 1 ..] else name;
+        for (w.resumables) |e| if (std.mem.eql(u8, e.name, name) or std.mem.eql(u8, e.name, bare)) return e;
+        return null;
+    }
+
+    /// a resumable program's step as the host reads it: its value, or its operation with the id of its rest — the
+    /// rest kept, resumed any number of times
+    fn kept(w: *Worker, a: Allocator, r: *Run, o: Outcome) Answer {
+        _ = w;
+        return switch (o) {
+            .done => |v| .{ .ok = object(a, .{.{ "done", outgoing(a, v) catch oom() }}) },
+            .perform => |p| blk: {
+                r.next += 1;
+                r.kept.put(r.b.arena, r.next, p.rest) catch oom();
+                break :blk .{ .ok = object(a, .{
+                    .{ "perform", Value{ .string = a.dupe(u8, p.name) catch oom() } },
+                    .{ "args", outgoing(a, array(a, p.args)) catch oom() },
+                    .{ "k", Value{ .integer = @intCast(r.next) } },
+                }) };
+            },
+            .failed => |c| .{ .condition = .{
+                .kind = a.dupe(u8, c.kind) catch oom(),
+                .message = a.dupe(u8, c.message) catch oom(),
+            } },
+        };
     }
 
     pub fn deinit(w: *Worker) void {
@@ -854,6 +963,13 @@ pub const Worker = struct {
                 w.parked.put(w.gpa, run.?, parked) catch oom();
                 return w.directNode(a, run.?, parked, w.turnOf(parked, null));
             }
+            if (w.findResumable(fn_.?)) |e| {
+                const r = Run.make(w.gpa);
+                w.runs.put(w.gpa, run.?, r) catch oom();
+                var why: Condition = undefined;
+                const args = w.argsOf(r.b.arena, req, &why) orelse return .{ .condition = why };
+                return w.kept(a, r, e.start(r.b.arena, args));
+            }
             const p = w.find(fn_.?) orelse return refuse("LookupError", "no program by that name in this worker");
             const r = Run.make(w.gpa);
             w.runs.put(w.gpa, run.?, r) catch oom();
@@ -870,6 +986,7 @@ pub const Worker = struct {
                 return w.directNode(a, run.?, parked, w.turnOf(parked, replyOf(parked.arena.allocator(), req)));
             }
             const r = w.runs.get(run.?) orelse return refuse("LookupError", "no such run here (forgotten?)");
+            if (r.kept.get(k.?)) |rest| return w.kept(a, r, rest.step(r.b.arena, rest.k, replyOf(r.b.arena, req)));
             const rest = r.rests.get(k.?) orelse
                 return refuse("LookupError", "that continuation is not held here (forgotten, or another process)");
             const reply = replyOf(r.b.arena, req);
@@ -894,6 +1011,20 @@ pub const Worker = struct {
                 return switch (w.turnOf(parked, null)) {
                     .done => |v| .{ .ok = outgoing(a, v) catch oom() },
                     .perform => refuse("ValueError", "it calls the host: a call answers a value; run it as a program"),
+                    .failed => |c| .{ .condition = .{
+                        .kind = a.dupe(u8, c.kind) catch oom(),
+                        .message = a.dupe(u8, c.message) catch oom(),
+                    } },
+                };
+            }
+            if (w.findResumable(fn_)) |e| {
+                const r = Run.make(w.gpa);
+                defer r.drop(w.gpa);
+                var why: Condition = undefined;
+                const args = w.argsOf(r.b.arena, req, &why) orelse return .{ .condition = why };
+                return switch (e.start(r.b.arena, args)) {
+                    .done => |v| .{ .ok = outgoing(a, v) catch oom() },
+                    .perform => refuse("ValueError", "it performs: a call answers a value; run it as a program"),
                     .failed => |c| .{ .condition = .{
                         .kind = a.dupe(u8, c.kind) catch oom(),
                         .message = a.dupe(u8, c.message) catch oom(),
@@ -1068,16 +1199,24 @@ pub const Worker = struct {
             const line = std.mem.trimEnd(u8, raw, "\r");
             if (line.len == 0) continue;
             const own = w.gpa.dupe(u8, line) catch oom();
+            _ = w.inflight.fetchAdd(1, .acq_rel); // counted before its task starts, done when it has answered
             group.concurrent(io, answerLine, .{ w, own }) catch answerLine(w, own);
         }
+        // the host is gone: the streams stopped, the requests in flight given a second to answer; one still waiting
+        // then (a call for another that will never come) is left — `serve` says so, and the process ends
         w.lock();
         w.stopStreams();
         w.unlock();
-        group.cancel(io);
+        var waited: usize = 0;
+        while (w.inflight.load(.acquire) > 0 and waited < 100) : (waited += 1)
+            io.sleep(.fromMilliseconds(10), .awake) catch break;
+        if (w.inflight.load(.acquire) > 0) return error.LeftWaiting;
+        group.await(io) catch {};
         w.out = null;
     }
 
     fn answerLine(w: *Worker, line: []u8) void {
+        defer _ = w.inflight.fetchSub(1, .acq_rel);
         defer w.gpa.free(line);
         const reply = w.serve1(line);
         defer w.gpa.free(reply);

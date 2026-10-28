@@ -185,6 +185,20 @@ okay-goose's lanes, n = 1000, µs per run, five rounds of a second):
 Against okay-rust's `#[resumable]` (0.24 / 0.35 / 0.29) and okay-goose (1.23 / 1.23 / 1.21), from their READMEs: the
 same lanes, other runs. In `everyPath` a value reached at once is told in the loop, not by a call: 1.04 → 0.38.
 
+## Resumable programs on the wire (2026-10-28)
+
+`wire.served(K, name, start)` serves a resumable program: `start(arena, args) !Step(K)` its first step; each operation
+goes to the host by its tag's name (its payload the arguments), the host's answer is decoded as `K.Answer`
+(`TypeError` if it is not one), its value encoded. The worker keeps each rest as a COPY in the run's arena with the
+function that steps it (`Kept`); a `continue` steps a copy of the kept one, so the host resumes the same `k` any number
+of times — no machine, no frames, no replay. `Worker.withResumable(entries)`; a resumable program is found before a
+machine program of the same name. okay's `WireConformance` MULTI-SHOT runs on one now (`pairs`, `Pairs` in
+`conformance/programs.zig`): every branch of two choices, across the link.
+
+At the end of the input (mux) the worker no longer cancels its requests: the streams are stopped, the requests in
+flight are given a second to answer, and their replies go out; a call still waiting then (for another that will never
+come) is left — `serve` answers `error.LeftWaiting`, and the stdio worker ends its process.
+
 ## Next
 
 1. A host's policy over a Zig program: okay-guard's `Action` for each `perform` the worker sends (service = the

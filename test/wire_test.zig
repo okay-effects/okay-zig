@@ -327,3 +327,56 @@ fn directStyle(io: std.Io) !void {
     );
     gpa.free(left);
 }
+
+test "a RESUMABLE program on the wire: its rest a copy kept by the worker, continued twice, no machine" {
+    const gpa = std.testing.allocator;
+    var w = ok.wire.Worker.init(gpa, &.{}).withResumable(&conformance.resumables);
+    defer w.deinit();
+    const lines = [_][2][]const u8{
+        .{
+            \\{"id": 1, "op": "program", "run": 1, "fn": "t:pairs", "args": []}
+            ,
+            \\{"id":1,"ok":{"perform":"choose","args":[[1,2]],"k":1}}
+        },
+        .{
+            \\{"id": 2, "op": "continue", "run": 1, "k": 1, "answer": 1}
+            ,
+            \\{"id":2,"ok":{"perform":"choose","args":[[10,20]],"k":2}}
+        },
+        .{
+            \\{"id": 3, "op": "continue", "run": 1, "k": 2, "answer": 10}
+            ,
+            \\{"id":3,"ok":{"done":11}}
+        },
+        .{
+            \\{"id": 4, "op": "continue", "run": 1, "k": 2, "answer": 20}
+            ,
+            \\{"id":4,"ok":{"done":21}}
+        },
+        .{
+            \\{"id": 5, "op": "continue", "run": 1, "k": 1, "answer": 2}
+            ,
+            \\{"id":5,"ok":{"perform":"choose","args":[[10,20]],"k":3}}
+        },
+        .{
+            \\{"id": 6, "op": "continue", "run": 1, "k": 3, "answer": 20}
+            ,
+            \\{"id":6,"ok":{"done":22}}
+        },
+        .{
+            \\{"id": 7, "op": "continue", "run": 1, "k": 3, "answer": "x"}
+            ,
+            \\{"id":7,"condition":{"kind":"TypeError","message":"the host's answer is not a i64"}}
+        },
+        .{
+            \\{"id": 8, "op": "forget", "run": 1}
+            ,
+            \\{"id":8,"ok":null}
+        },
+    };
+    for (lines) |l| {
+        const got = w.serve1(l[0]);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(l[1], got);
+    }
+}

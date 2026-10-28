@@ -213,3 +213,29 @@ pub const direct = [_]wire.DirectEntry{
     .{ .name = "sum_after", .function = sumAfter },
     .{ .name = "dedup", .function = dedup },
 };
+
+// ---- resumable: the rest a value, kept by the worker as a copy — no machine
+
+/// two choices, answering their sum — as `pairs`, its states written by hand
+const Pairs = union(enum) {
+    first,
+    second: struct { x: i64 },
+
+    pub const Op = union(enum) { choose: []const i64 };
+    pub const Answer = i64;
+    pub const Out = i64;
+
+    fn start(_: std.mem.Allocator, _: []const Value) anyerror!ok.resumable.Step(Pairs) {
+        return ok.resumable.perform(Pairs, .{ .choose = &.{ 1, 2 } }, .first);
+    }
+    pub fn step(self: Pairs, v: i64) ok.resumable.Step(Pairs) {
+        return switch (self) {
+            .first => ok.resumable.perform(Pairs, .{ .choose = &.{ 10, 20 } }, .{ .second = .{ .x = v } }),
+            .second => |s| ok.resumable.done(Pairs, s.x + v),
+        };
+    }
+};
+
+pub const resumables = [_]wire.ResumableEntry{
+    wire.served(Pairs, "pairs", Pairs.start),
+};
