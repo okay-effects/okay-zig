@@ -22,7 +22,11 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run the tests");
-    inline for (.{ "test/std_test.zig", "test/cx_test.zig", "test/wire_test.zig", "test/tck_test.zig" }) |file| {
+    const tests = .{
+        "test/std_test.zig", "test/cx_test.zig",        "test/wire_test.zig",
+        "test/tck_test.zig", "test/resumable_test.zig",
+    };
+    inline for (tests) |file| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(file),
             .target = target,
@@ -40,6 +44,15 @@ pub fn build(b: *std.Build) void {
     }) });
     const run_bench = b.addRunArtifact(bench);
     b.step("bench", "Run the benchmark (with -Doptimize=ReleaseFast)").dependOn(&run_bench.step);
+
+    const lanes = b.addExecutable(.{ .name = "lanes", .root_module = b.createModule(.{
+        .root_source_file = b.path("bench/lanes.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "okay", .module = okay }},
+    }) });
+    b.step("lanes", "Multi-shot lanes, as okay-rust's and okay-goose's (with -Doptimize=ReleaseFast)")
+        .dependOn(&b.addRunArtifact(lanes).step);
 
     // the conformance worker: on stdin/stdout, and as a library of okay's C ABI (FFM)
     const worker = b.addExecutable(.{ .name = "zig-worker", .root_module = b.createModule(.{

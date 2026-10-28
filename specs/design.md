@@ -164,6 +164,27 @@ time.
   never more than its credit ahead, an early stop cancelling it, the host feeding no further than its credit, a dedup
   of 20 000 rows both ways. In process (FFM) the link is not duplex: those six skipped, as for Go's WebAssembly worker.
 
+## Resumable programs (2026-10-28)
+
+`src/resumable.zig`: the rest of a program as a VALUE, with no machine. A resumable program is a `union(enum)` of its
+stops, each holding the variables alive there, with `Op`, `Answer`, `Out` and `step(self, answer) Step(K)`; a step is
+its value or an operation and the rest. Zig copies a union by value, so a handler resumes `k` as often as it wants:
+`everyPath` (each answer of `h.answers(op)`, the rest copied for each), `run` (each operation answered in place,
+once). `check(K)` says at compile time what a type lacks. Zig's comptime cannot rewrite a function's body: the states
+are written by hand, in the shape Rust's `#[resumable]` and Goose's okgc generate.
+
+The "many" path: this, or the machine. Measured (`zig build lanes -Doptimize=ReleaseFast`, okay-rust's and
+okay-goose's lanes, n = 1000, µs per run, five rounds of a second):
+
+| lane | resumable | the CEK machine |
+|---|---|---|
+| every path of a choice among 1000 | 0.38 | 29.2 |
+| a deep handler taking the rest at each of 1000 steps | 0.39 | 22.8 |
+| a generator of 1000 values, summed | 0.39 | 29.9 |
+
+Against okay-rust's `#[resumable]` (0.24 / 0.35 / 0.29) and okay-goose (1.23 / 1.23 / 1.21), from their READMEs: the
+same lanes, other runs. In `everyPath` a value reached at once is told in the loop, not by a call: 1.04 → 0.38.
+
 ## Next
 
 1. A host's policy over a Zig program: okay-guard's `Action` for each `perform` the worker sends (service = the

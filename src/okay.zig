@@ -551,3 +551,6 @@ pub const needs = @import("cx.zig").needs;
 
 /// okay's wire: Zig programs served to okay's hosts, run under their handlers
 pub const wire = @import("wire.zig");
+
+/// resumable programs: the rest of a program a value — a state machine copied to resume it again
+pub const resumable = @import("resumable.zig");

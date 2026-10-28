@@ -83,6 +83,14 @@ okay's `WireConformance` passes in full over pipes (multi-shot across the link, 
 `Reader`, tables, held values, failures by name, direct style, mux, streams, a duplex dedup):
 `conformance/TestZigLinks.scala`.
 
+## Resumable programs
+
+For the effects whose rest is taken many times (choice, backtracking), `ok.resumable` keeps the rest as a VALUE with
+no machine: a program is a `union(enum)` of its stops, each holding its live variables, and `step(self, answer)`
+goes to the next stop. Zig copies a union by value, so a handler resumes the rest as often as it wants — every path of
+a choice among 1000 in 0.38 µs, against 29 µs through the machine (`zig build lanes -Doptimize=ReleaseFast`). The
+states are written by hand: the shape Rust's `#[resumable]` and Goose's okgc generate.
+
 ## The family's TCK
 
 okay-kernel's thousand random programs — handlers nested in any order (`b.intercept`: a handler that keeps the row),
