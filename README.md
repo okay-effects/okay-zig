@@ -74,8 +74,15 @@ Zig programs run under another language's handlers: `ok.wire` serves them to oka
 [okay's wire](https://github.com/okay-effects) — on a child's pipes (`zig build worker`: `zig-out/bin/zig-worker`) or
 in the host's own process through its C ABI (`zig-out/lib/libokay-zig-worker`). A program performs `Host` operations
 (`Host.call(b, R, "price_of", args)`) or a typed effect sent by `remote`; each goes to the host, which resumes the rest
-any number of times — okay's `WireConformance` passes (multi-shot across the link, typed callbacks under the host's
+any number of times. `wire.guard(b, E, p, g)` puts a guard before them: a refused operation never reaches the host,
+and the program fails with a condition named by the guard's error. okay's `WireConformance` passes (multi-shot across the link, typed callbacks under the host's
 `Reader`, tables, held values, failures by name): `conformance/TestZigLinks.scala`.
+
+## The family's TCK
+
+okay-kernel's thousand random programs — handlers nested in any order (`b.intercept`: a handler that keeps the row),
+each effect twice — give okay-kernel's digest here as on the reference machine, okay-java and okay-rust
+(`test/tck_test.zig`).
 
 Zig 0.17.0. `zig build test`, `zig build bench -Doptimize=ReleaseFast`. One of the
 [okay-effects](https://github.com/okay-effects) family. The design: [specs/design.md](specs/design.md).

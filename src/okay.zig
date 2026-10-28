@@ -109,6 +109,8 @@ pub const Handling = struct {
     ret: *const fn (ctx: Val, b: *Build, value: Val) *Node,
     op: ?*const fn (ctx: Val, b: *Build, op: Val, k: *const Captured) *Node,
     answer: ?*const fn (ctx: Val, b: *Build, op: Val) Val,
+    /// an INTERCEPTOR: it takes its effect's operations and keeps the row — a place past it is not renumbered
+    keeps: bool = false,
 };
 
 /// A PROGRAM AS DATA. A run CONSUMES it — each node freed as soon as the machine has read it — unless it is
@@ -270,7 +272,7 @@ pub const Build = struct {
                         switch (fr.kind) {
                             .handle => |h| {
                                 if (h.place == place) break fr;
-                                if (place > h.place) place -= 1;
+                                if (!h.h.keeps and place > h.place) place -= 1;
                             },
                             else => {},
                         }
@@ -414,12 +416,31 @@ pub const Build = struct {
     /// program `k` (`k.answer(b, tag, value)` resumes it — once, twice, or never). The program's row without `E`.
     pub fn handle(b: *Build, comptime E: type, p: anytype, h: anytype) HandledBy(@TypeOf(h)) {
         const P = @TypeOf(p);
-        const H = @TypeOf(h);
-        const Out = HandledBy(H);
+        const Out = HandledBy(@TypeOf(h));
         const place = comptime P.Effects.place(E);
         comptime if (Out.Effects != P.Effects.without(place))
             @compileError("handle: the handler's row is " ++ @typeName(Out.Effects) ++ ", the program's without " ++
                 @typeName(E) ++ " is " ++ @typeName(P.Effects.without(place)));
+        return b.install(E, p, h, false);
+    }
+
+    /// `p` with `E`'s operations taken by `h` — as `handle` — and the ROW KEPT: an operation of `E` inside goes to
+    /// `h`, one outside it to the next handler of `E`. A handler anywhere in a program, its row one type (the TCK's
+    /// handlers nested in any order)
+    pub fn intercept(b: *Build, comptime E: type, p: anytype, h: anytype) HandledBy(@TypeOf(h)) {
+        const P = @TypeOf(p);
+        const Out = HandledBy(@TypeOf(h));
+        comptime if (Out.Effects != P.Effects)
+            @compileError("intercept: the handler's row is " ++ @typeName(Out.Effects) ++ ", the program's " ++
+                @typeName(P.Effects));
+        return b.install(E, p, h, true);
+    }
+
+    fn install(b: *Build, comptime E: type, p: anytype, h: anytype, keeps: bool) HandledBy(@TypeOf(h)) {
+        const P = @TypeOf(p);
+        const H = @TypeOf(h);
+        const Out = HandledBy(H);
+        const place = comptime P.Effects.place(E);
         const W = struct {
             fn ret(c: Val, bb: *Build, v: Val) *Node {
                 return Val.take(H, c).ret(bb, Val.take(P.Value, v)).node;
@@ -429,13 +450,22 @@ pub const Build = struct {
             }
         };
         const handling = b.arena.create(Handling) catch oom();
-        handling.* = .{ .ctx = Val.put(b.arena, H, h), .ret = W.ret, .op = W.op, .answer = null };
+        handling.* = .{ .ctx = Val.put(b.arena, H, h), .ret = W.ret, .op = W.op, .answer = null, .keeps = keeps };
         return .{ .node = b.node(.{ .handle = .{ .prog = p.node, .place = place, .h = handling } }) };
     }
 
     /// `p` with `E` answered IN PLACE by `h`: a method of `h` an operation, by its name, its answer the operation's
     /// (`State`: `get(self) S`, `put(self, s) void`) — no `k` taken, the cheapest handler
     pub fn handleTail(b: *Build, comptime E: type, p: anytype, h: anytype) Handled(@TypeOf(p), E, @TypeOf(p).Value) {
+        return .{ .node = b.installTail(E, p, h, false) };
+    }
+
+    /// `p` with `E` answered in place by `h` — as `handleTail` — and the row kept, as `intercept`
+    pub fn interceptTail(b: *Build, comptime E: type, p: anytype, h: anytype) @TypeOf(p) {
+        return .{ .node = b.installTail(E, p, h, true) };
+    }
+
+    fn installTail(b: *Build, comptime E: type, p: anytype, h: anytype, keeps: bool) *Node {
         const P = @TypeOf(p);
         const H = @TypeOf(h);
         const place = comptime P.Effects.place(E);
@@ -455,8 +485,8 @@ pub const Build = struct {
             }
         };
         const handling = b.arena.create(Handling) catch oom();
-        handling.* = .{ .ctx = Val.put(b.arena, H, h), .ret = W.ret, .op = null, .answer = W.answer };
-        return .{ .node = b.node(.{ .handle = .{ .prog = p.node, .place = place, .h = handling } }) };
+        handling.* = .{ .ctx = Val.put(b.arena, H, h), .ret = W.ret, .op = null, .answer = W.answer, .keeps = keeps };
+        return b.node(.{ .handle = .{ .prog = p.node, .place = place, .h = handling } });
     }
 
     /// a program of no effect, run: its value

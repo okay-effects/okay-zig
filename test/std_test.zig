@@ -184,3 +184,18 @@ test "writer: told in order" {
     try t.expectEqual(2, told.items.len);
     try t.expectEqualStrings("two", told.items[1]);
 }
+
+test "intercept: a handler that keeps the row — the operations inside to it, those outside past it" {
+    var a = std.heap.ArenaAllocator.init(t.allocator);
+    defer a.deinit();
+    var b = Build{ .arena = a.allocator() };
+    const R = ok.Row(.{ Name, Counter });
+    var inner: u32 = 100;
+    var outer: u32 = 1;
+    // put 7 inside the interceptor, then put 9 outside it: one row all along
+    const inside = b.interceptTail(Counter, Counter.put(&b, R, 7), Counter.Cell{ .s = &inner });
+    const p = b.andThen(inside, Counter.put(&b, R, 9));
+    _ = b.run(Name.given(&b, Counter.inCell(&b, p, &outer), "x"));
+    try t.expectEqual(7, inner);
+    try t.expectEqual(9, outer);
+}

@@ -319,6 +319,37 @@ pub fn remote(b: *Build, comptime E: type, p: anytype) ok.Handled(@TypeOf(p), E,
     return b.handle(E, p, H{});
 }
 
+/// `p` with `E`'s operations decided by the GUARD `g` (`decide(op) !void`, as a context's guard) before they go on: one
+/// allowed is performed past the guard — to the host, or to the next handler of `E` — and its answer given back; one
+/// refused is the program's failure, a condition named by the guard's error (`OverBudget`), the operation never
+/// performed. The row is kept; `Host` must be in it.
+pub fn guard(b: *Build, comptime E: type, p: anytype, g: anytype) @TypeOf(p) {
+    const P = @TypeOf(p);
+    const Rs = P.Effects;
+    const K = ok.Resume(E, P);
+    const G = @TypeOf(g);
+    const H = struct {
+        g: G,
+        pub fn ret(_: @This(), bb: *Build, a: P.Value) P {
+            return bb.pure(P.Value, Rs, a);
+        }
+        pub fn op(self: @This(), bb: *Build, o: E.Op, k: K) P {
+            self.g.decide(o) catch |e| return Host.fail(bb, P.Value, Rs, @errorName(e), "refused by a guard");
+            switch (o) {
+                inline else => |payload, tag| {
+                    const Back = struct {
+                        fn answered(kk: K, bbb: *Build, x: E.Answer(tag)) P {
+                            return kk.answer(bbb, tag, x);
+                        }
+                    };
+                    return bb.then(bb.perform(Rs, E, tag, payload), k, Back.answered);
+                },
+            }
+        }
+    };
+    return b.intercept(E, p, H{ .g = g });
+}
+
 // ------------------------------------------------------------------------------------------------ the worker
 
 /// a program stepped as far as the host must answer: its value, an operation with its rest, or its failure

@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     };
 
     const test_step = b.step("test", "Run the tests");
-    inline for (.{ "test/std_test.zig", "test/cx_test.zig", "test/wire_test.zig" }) |file| {
+    inline for (.{ "test/std_test.zig", "test/cx_test.zig", "test/wire_test.zig", "test/tck_test.zig" }) |file| {
         const t = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path(file),
             .target = target,

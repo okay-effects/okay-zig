@@ -200,3 +200,56 @@ test "a typed effect sent to the host: operations by name, answers decoded (tagg
         \\{"id": 7, "condition": {"kind": "ValueError", "message": "*"}}
     });
 }
+
+/// a guard of the host's operations: a discount past a limit refused, by an error of its own
+const Limit = struct {
+    max: f64,
+    pub fn decide(self: Limit, op: ok.wire.Host.Op) error{OverBudget}!void {
+        switch (op) {
+            .request => |r| if (std.mem.eql(u8, r.name, "discount") and
+                (ok.wire.float(r.args[0]) orelse 0) > self.max) return error.OverBudget,
+            .fail => {},
+        }
+    }
+};
+
+const R = ok.wire.Remote;
+fn guardedTotal(b: *ok.Build, args: []const Value) R.Of(Value) {
+    const price = ok.wire.Host.call(b, R, "price_of", args[0..1]);
+    const S = struct {
+        fn priced(qty: Value, bb: *ok.Build, p: Value) R.Of(Value) {
+            const amount = (ok.wire.float(p) orelse 0) * (ok.wire.float(qty) orelse 0);
+            const xs = bb.arena.dupe(Value, &.{.{ .float = amount }}) catch unreachable;
+            return ok.wire.Host.call(bb, R, "discount", xs);
+        }
+    };
+    return ok.wire.guard(b, ok.wire.Host, b.then(price, args[1], S.priced), Limit{ .max = 20 });
+}
+
+test "a guard on the wire: an allowed operation goes to the host; a refused one is a condition by the guard's error" {
+    const gpa = std.testing.allocator;
+    var w = ok.wire.Worker.init(gpa, &.{.{ .name = "guarded", .program = guardedTotal }});
+    defer w.deinit();
+    const lines = [_][2][]const u8{
+        .{
+            \\{"id": 1, "op": "program", "run": 1, "fn": "guarded", "args": ["tea", 3]}
+            ,
+            \\{"id":1,"ok":{"perform":"price_of","args":["tea"],"k":1}}
+        },
+        .{
+            \\{"id": 2, "op": "continue", "run": 1, "k": 1, "answer": 4.5}
+            ,
+            \\{"id":2,"ok":{"perform":"discount","args":[13.5],"k":2}}
+        },
+        .{
+            \\{"id": 3, "op": "continue", "run": 1, "k": 1, "answer": 9}
+            ,
+            \\{"id":3,"condition":{"kind":"OverBudget","message":"refused by a guard"}}
+        },
+    };
+    for (lines) |l| {
+        const got = w.serve1(l[0]);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(l[1], got);
+    }
+}
