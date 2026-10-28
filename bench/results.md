@@ -19,9 +19,11 @@ iterations and 5 of a second, one fork. Load 1.6–2.4. Each answer through an o
 - The first three are the rest of a program taken more than once (or at each step): Goose's and Rust's state
   machines are generated (okgc, a proc macro), Zig's are written by hand; the machines interpret a program as data.
 - Rust's machine: okay-machine's `kernel` bench (`choose`, `general`, `writer`); its generator (okay-machine's
-  `generate` handler, pulled and summed: 112.6 and 134.5 in two rounds) measured by a scratch crate beside it. Its binds are `Rc<dyn Fn>` closures and its values `Box<dyn Any>`: an allocation and an
-  indirect call a step, where Zig's machine keeps values of 16 bytes in place and reuses nodes from free lists, and
-  Scala's allocates in the JVM's young generation, its calls compiled by the JIT.
+  `generate` handler, pulled and summed: 112.6 and 134.5 in two rounds) measured by a scratch crate beside it. Its frames keep a small closure (24 bytes) in place, and a rest resumed once is moved back as it is; a node is a
+  `Box` of its own, freed by its drop, and a rest resumed more than once is copied with a reference count, a
+  `RefCell` and a drop for each of its frames. Zig's machine has no destructor: a run is an arena, nodes and frames
+  come back on free lists, values of 16 bytes sit in place, and a copy of a rest is bits. Scala's allocates in the
+  JVM's young generation, its calls compiled by the JIT.
 - Scala's lanes are okay-core's `KernelBenchmark` (`choose`, `general`, `generate`, `writer`): the same programs in
   shape — its generator is pulled through okay-core's `Emit.generate`, its choice collects every value.
 - Zig's context writer was 0.93 while it was the only writer in the binary. With the machine's writer beside it, the
