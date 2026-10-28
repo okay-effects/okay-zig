@@ -10,4 +10,5 @@ Read before anything else, then `specs/design.md`: a change of design is a chang
   language changes between versions: a newer one is a deliberate move, the whole suite run.
 - `zig build test`; `zig build bench -Doptimize=ReleaseFast`. Lines at most 120 wide. Commits: plain messages, no
   attribution trailers.
-- The erasure (`Any`, `box`, `unbox`) is the machine's alone; the typed words are the only way in, so no user code casts.
+- The erasure (`Any`, `box`, `unbox`) is the machine's alone; the typed words are the only way in, so no user code
+  casts. `zig fmt` keeps the form; lines over 120 are wrapped by hand.

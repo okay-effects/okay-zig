@@ -122,6 +122,10 @@ pub const Build = struct {
         return p;
     }
 
+    fn bindNode(b: *Build, prog: *const Node, ctx: Any, call: *const fn (Any, *Build, Any) *const Node) *const Node {
+        return b.node(.{ .bind = .{ .prog = prog, .k = .{ .ctx = ctx, .call = call } } });
+    }
+
     fn valueNode(b: *Build, v: Any) *const Node {
         return b.node(.{ .value = v });
     }
@@ -210,7 +214,13 @@ pub const Build = struct {
     }
 
     /// an operation of `E`, its answer the program's value: `E` must be in `R`
-    pub fn perform(b: *Build, comptime R: anytype, comptime E: type, comptime tag: std.meta.Tag(E.Op), payload: @FieldType(E.Op, @tagName(tag))) Eff(E.Answer(tag), R) {
+    pub fn perform(
+        b: *Build,
+        comptime R: anytype,
+        comptime E: type,
+        comptime tag: std.meta.Tag(E.Op),
+        payload: @FieldType(E.Op, @tagName(tag)),
+    ) Eff(E.Answer(tag), R) {
         const place = comptime rowOf(R).place(E);
         const op = @unionInit(E.Op, @tagName(tag), payload);
         return .{ .node = b.node(.{ .perform = .{ .place = place, .op = box(b.arena, E.Op, op) } }) };
@@ -221,13 +231,14 @@ pub const Build = struct {
         const P = @TypeOf(p);
         const Ctx = @TypeOf(ctx);
         const Q = ReturnOf(f);
-        comptime if (P.Effects != Q.Effects) @compileError("then: " ++ @typeName(P.Effects) ++ " and " ++ @typeName(Q.Effects) ++ " are not one row");
+        comptime if (P.Effects != Q.Effects)
+            @compileError("then: " ++ @typeName(P.Effects) ++ " and " ++ @typeName(Q.Effects) ++ " are not one row");
         const W = struct {
             fn call(c: Any, bb: *Build, v: Any) *const Node {
                 return f(unbox(Ctx, c), bb, unbox(P.Value, v)).node;
             }
         };
-        return .{ .node = b.node(.{ .bind = .{ .prog = p.node, .k = .{ .ctx = box(b.arena, Ctx, ctx), .call = W.call } } }) };
+        return .{ .node = b.bindNode(p.node, box(b.arena, Ctx, ctx), W.call) };
     }
 
     /// `p`'s value through `f(ctx, it)`
@@ -240,7 +251,7 @@ pub const Build = struct {
                 return bb.valueNode(box(bb.arena, B, f(unbox(Ctx, c), unbox(P.Value, v))));
             }
         };
-        return .{ .node = b.node(.{ .bind = .{ .prog = p.node, .k = .{ .ctx = box(b.arena, Ctx, ctx), .call = W.call } } }) };
+        return .{ .node = b.bindNode(p.node, box(b.arena, Ctx, ctx), W.call) };
     }
 
     /// `p`, then `q`, its value dropped
@@ -252,7 +263,7 @@ pub const Build = struct {
             }
         };
         _ = Q;
-        return .{ .node = b.node(.{ .bind = .{ .prog = p.node, .k = .{ .ctx = box(b.arena, *const Node, q.node), .call = W.call } } }) };
+        return .{ .node = b.bindNode(p.node, box(b.arena, *const Node, q.node), W.call) };
     }
 
     /// `p` with `E` handled by `h`: `h.ret(b, a)` its return, `h.op(b, op, k)` each operation with the rest of the
@@ -262,7 +273,9 @@ pub const Build = struct {
         const H = @TypeOf(h);
         const Out = HandledBy(H);
         const place = comptime P.Effects.place(E);
-        comptime if (Out.Effects != P.Effects.without(place)) @compileError("handle: the handler's row is " ++ @typeName(Out.Effects) ++ ", the program's without " ++ @typeName(E) ++ " is " ++ @typeName(P.Effects.without(place)));
+        comptime if (Out.Effects != P.Effects.without(place))
+            @compileError("handle: the handler's row is " ++ @typeName(Out.Effects) ++ ", the program's without " ++
+                @typeName(E) ++ " is " ++ @typeName(P.Effects.without(place)));
         const W = struct {
             fn ret(c: Any, bb: *Build, v: Any) *const Node {
                 return unbox(H, c).ret(bb, unbox(P.Value, v)).node;
@@ -278,7 +291,7 @@ pub const Build = struct {
 
     /// `p` with `E` answered IN PLACE by `h`: a method of `h` an operation, by its name, its answer the operation's
     /// (`State`: `get(self) S`, `put(self, s) void`) — no `k` taken, the cheapest handler
-    pub fn handleTail(b: *Build, comptime E: type, p: anytype, h: anytype) Eff(@TypeOf(p).Value, @TypeOf(p).Effects.without(@TypeOf(p).Effects.place(E))) {
+    pub fn handleTail(b: *Build, comptime E: type, p: anytype, h: anytype) Handled(@TypeOf(p), E, @TypeOf(p).Value) {
         const P = @TypeOf(p);
         const H = @TypeOf(h);
         const place = comptime P.Effects.place(E);
@@ -317,6 +330,11 @@ pub fn Eff(comptime A: type, comptime R: anytype) type {
         pub const Value = A;
         pub const Effects = rowOf(R);
     };
+}
+
+/// what a program `P` is with `E` handled, its value `B`: its row without `E`
+pub fn Handled(comptime P: type, comptime E: type, comptime B: type) type {
+    return Eff(B, P.Effects.without(P.Effects.place(E)));
 }
 
 /// the rest of a program, given to a handler's operation clause: resumed with the operation's answer

@@ -107,7 +107,7 @@ pub fn Fail(comptime E: type) type {
             return union(enum) { value: A, failed: E };
         }
         /// `p`'s value, or what it raised: the rest of the program never resumed
-        pub fn attempt(b: *Build, p: anytype) Eff(Result(@TypeOf(p).Value), @TypeOf(p).Effects.without(@TypeOf(p).Effects.place(Self))) {
+        pub fn attempt(b: *Build, p: anytype) ok.Handled(@TypeOf(p), Self, Result(@TypeOf(p).Value)) {
             const P = @TypeOf(p);
             const Rest = P.Effects.without(P.Effects.place(Self));
             const Out = Eff(Result(P.Value), Rest);
@@ -140,7 +140,7 @@ pub const Choose = struct {
     }
     /// EVERY value the program can give: each flip answered true, then the same rest answered false — `k` resumed
     /// twice
-    pub fn all(b: *Build, p: anytype) Eff([]const @TypeOf(p).Value, @TypeOf(p).Effects.without(@TypeOf(p).Effects.place(Self))) {
+    pub fn all(b: *Build, p: anytype) ok.Handled(@TypeOf(p), Self, []const @TypeOf(p).Value) {
         const P = @TypeOf(p);
         const A = P.Value;
         const Rest = P.Effects.without(P.Effects.place(Self));
@@ -158,7 +158,8 @@ pub const Choose = struct {
                             fn f(kk: ok.Resume(Self, Out), b2: *Build, xs: []const A) Out {
                                 return b2.map(kk.answer(b2, .flip, false), .{ .xs = xs, .arena = b2.arena }, struct {
                                     fn g(c: anytype, ys: []const A) []const A {
-                                        return std.mem.concat(c.arena, A, &.{ c.xs, ys }) catch @panic("okay-zig: out of memory");
+                                        return std.mem.concat(c.arena, A, &.{ c.xs, ys }) catch
+                                            @panic("okay-zig: out of memory");
                                     }
                                 }.g);
                             }

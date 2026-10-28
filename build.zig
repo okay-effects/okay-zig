@@ -3,7 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const okay = b.addModule("okay", .{ .root_source_file = b.path("src/okay.zig"), .target = target, .optimize = optimize });
+    const okay = b.addModule("okay", .{
+        .root_source_file = b.path("src/okay.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const test_step = b.step("test", "Run the tests");
     inline for (.{"test/std_test.zig"}) |file| {
