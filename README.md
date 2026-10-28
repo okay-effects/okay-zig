@@ -87,5 +87,19 @@ okay-kernel's thousand random programs — handlers nested in any order (`b.inte
 each effect twice — give okay-kernel's digest here as on the reference machine, okay-java and okay-rust
 (`test/tck_test.zig`).
 
+## Using it
+
+```sh
+zig fetch --save=okay "git+https://github.com/okay-effects/okay-zig#v0.1.0"
+```
+
+```zig
+// build.zig
+const okay = b.dependency("okay", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("okay", okay.module("okay"));
+```
+
+Then `const ok = @import("okay");` — `ok.context`, `ok.Build`, `ok.effects`, `ok.wire`.
+
 Zig 0.17.0. `zig build test`, `zig build bench -Doptimize=ReleaseFast`. One of the
 [okay-effects](https://github.com/okay-effects) family. The design: [specs/design.md](specs/design.md).
