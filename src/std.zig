@@ -86,6 +86,8 @@ pub fn Writer(comptime W: type) type {
             told: *std.ArrayList(W),
             arena: std.mem.Allocator,
             pub fn tell(self: Collect, w: W) void {
+                // room left: a store, inlined where it is told; growing, a call
+                if (self.told.items.len < self.told.capacity) return self.told.appendAssumeCapacity(w);
                 self.told.append(self.arena, w) catch @panic("okay-zig: out of memory");
             }
         };

@@ -76,7 +76,12 @@ pub fn Context(comptime Handlers: type, comptime Observers: type, comptime Guard
                 if (comptime T.Effect == E) try self.guards[i].decide(o);
             }
             const method = @field(@TypeOf(h), @tagName(tag));
-            return if (@TypeOf(payload) == void) method(h) else method(h, payload);
+            // inlined always: a handler's method used elsewhere too (the machine's in-place handler) is otherwise
+            // left a call — a writer's tell 0.9 → 3.0 ns
+            return if (@TypeOf(payload) == void)
+                @call(.always_inline, method, .{h})
+            else
+                @call(.always_inline, method, .{ h, payload });
         }
 
         /// the handler of `E` itself: calls on it are not observed

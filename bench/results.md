@@ -10,20 +10,24 @@ iterations and 5 of a second, one fork. Load 1.6–2.4. Each answer through an o
 |---|---|---|---|---|---|---|
 | every path of a choice among 1000 | 0.40 | 0.36 | **0.25** | 13.0 | 29.4 | 100.4 |
 | a deep handler taking the rest at each of 1000 steps | **0.24** | 0.39 | 0.57 | 9.8 | 23.0 | 37.7 |
-| a generator of 1000 values, summed | **0.24** | 0.38 | 0.30 | 17.8 | 30.3 | — |
+| a generator of 1000 values, summed | **0.24** | 0.38 | 0.30 | 17.8 | 30.3 | ~124 |
 
-| lane | Goose (a context) | Zig (a context) | Rust `okay::typed` | Scala |
-|---|---|---|---|---|
-| 1000 values told, kept | **0.13** | 0.93 | 1.08 | 9.0 |
+| lane | Goose (a context) | Zig (a context) | Rust `okay::typed` | Scala machine | Zig machine | Rust machine |
+|---|---|---|---|---|---|---|
+| 1000 values told, kept | **0.13** | 1.9 | 1.08 | 9.0 | 8.9 | 9.8 |
 
 - The first three are the rest of a program taken more than once (or at each step): Goose's and Rust's state
   machines are generated (okgc, a proc macro), Zig's are written by hand; the machines interpret a program as data.
-- Rust's machine: okay-machine's `kernel` bench (`choose`, `general`, `writer`: 9.8 for the writer); it has no
-  multi-shot generator lane. Its binds are `Rc<dyn Fn>` closures and its values `Box<dyn Any>`: an allocation and an
+- Rust's machine: okay-machine's `kernel` bench (`choose`, `general`, `writer`); its generator (okay-machine's
+  `generate` handler, pulled and summed: 112.6 and 134.5 in two rounds) measured by a scratch crate beside it. Its binds are `Rc<dyn Fn>` closures and its values `Box<dyn Any>`: an allocation and an
   indirect call a step, where Zig's machine keeps values of 16 bytes in place and reuses nodes from free lists, and
   Scala's allocates in the JVM's young generation, its calls compiled by the JIT.
 - Scala's lanes are okay-core's `KernelBenchmark` (`choose`, `general`, `generate`, `writer`): the same programs in
   shape — its generator is pulled through okay-core's `Emit.generate`, its choice collects every value.
+- Zig's context writer was 0.93 while it was the only writer in the binary. With the machine's writer beside it, the
+  handler's `tell` and the list's `append` got a second caller and LLVM stopped inlining them into the context (3.0).
+  Now `cx.op` inlines a handler's method always, and `Writer.Collect.tell` takes its fast path (room left: a store)
+  itself: 1.9 — the list kept behind a pointer, in memory, not registers.
 - The writer: Goose's array grows by a bump of the data stack and never moves; Zig's and Rust's lists reallocate.
 
 Commands: `okgc build bench/lanes.okg -o lanes --include bench/opaque.h` (okay-goose); `zig build lanes

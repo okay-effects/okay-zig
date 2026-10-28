@@ -247,11 +247,36 @@ fn cxWriter() i64 {
     _ = arena_state.reset(.retain_capacity);
     var told: std.ArrayList(i64) = .empty;
     const cx = ok.context(.{Told.Collect{ .told = &told, .arena = arena_state.allocator() }});
+    const n = opaque_(N);
     var i: i64 = 0;
-    while (i < opaque_(N)) : (i += 1) cx.op(Told, .tell, opaque_(i));
+    while (i < n) : (i += 1) cx.op(Told, .tell, opaque_(i));
     var s: i64 = 0;
     for (told.items) |x| s += x;
     return s;
+}
+
+/// 1000 values told by a program as data, answered in place by the same `Writer.Collect` (Scala's `writer`, okay-rust's
+/// machine `writer`)
+fn mWriter() i64 {
+    var b = fresh();
+    const R = ok.Row(.{Told});
+    var told: std.ArrayList(i64) = .empty;
+    const Loop = struct {
+        const At = struct { i: i64, n: i64 };
+        fn from(bb: *Build, at: At) R.Of(void) {
+            if (at.i == at.n) return bb.pure(void, R, {});
+            return bb.then(Told.tell(bb, R, opaque_(at.i)), at, struct {
+                fn g(c: At, b2: *Build, _: void) R.Of(void) {
+                    return from(b2, .{ .i = c.i + 1, .n = c.n });
+                }
+            }.g);
+        }
+    };
+    const p = Loop.from(&b, .{ .i = 0, .n = opaque_(N) });
+    b.run(b.handleTail(Told, p, Told.Collect{ .told = &told, .arena = b.arena }));
+    var total: i64 = 0;
+    for (told.items) |x| total += x;
+    return total;
 }
 
 // ------------------------------------------------------------------------------------------------ timing
@@ -285,6 +310,7 @@ pub fn main(init: std.process.Init) void {
     // the answers, checked
     const want = [_]i64{ N, 1, N * (N - 1) / 2 };
     if (cxWriter() != N * (N - 1) / 2) @panic("writer");
+    if (mWriter() != N * (N - 1) / 2) @panic("machine writer");
     const rs_got = [_]i64{ rsChoose(), rsGeneral(), rsGenerate() };
     const m_got = [_]i64{ mChoose(), mGeneral(), mGenerate() };
     if (!std.mem.eql(i64, &want, &rs_got) or !std.mem.eql(i64, &want, &m_got)) {
@@ -298,4 +324,5 @@ pub fn main(init: std.process.Init) void {
     lane(init.io, "M:general", mGeneral);
     lane(init.io, "M:generate", mGenerate);
     lane(init.io, "CX:writer", cxWriter);
+    lane(init.io, "M:writer", mWriter);
 }
