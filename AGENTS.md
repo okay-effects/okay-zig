@@ -4,6 +4,8 @@ Read before anything else, then `specs/design.md`: a change of design is a chang
 
 - Algebraic effects and handlers for Zig, okay-scala's design: a program is DATA (`Node`), its type `Eff(A, R)` — its
   value and its ROW of effects, checked at compile time (`Row.place`: a missing effect is a compile error naming both).
+- Two layers, one set of handlers: CONTEXTS (`src/cx.zig`: a plain function given `cx`, `cx.op`, observers) and the
+  MACHINE. A handler is a struct whose methods are the operations and that says `pub const Effect = E`.
 - One machine (`Build.eval`): a CEK machine, its continuation an immutable stack in an arena — `k` resumed any number
   of times. Handlers: `handle` (with `k`), `handleTail` (in place: a method an operation).
 - Zig 0.17.0, pinned, in `~/.zig/zig-aarch64-macos-0.17.0` (`export PATH=~/.zig/zig-aarch64-macos-0.17.0:$PATH`). The

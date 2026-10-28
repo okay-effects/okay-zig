@@ -1,8 +1,34 @@
 # okay-zig
 
-Algebraic effects and handlers for Zig, as [okay-scala](https://github.com/okay-effects/okay-scala) has them: a
-program is data, its type says its value and its effects, a handler takes an effect out of the program's row — and may
-resume the rest of the program once, twice, or never.
+Algebraic effects and handlers for Zig, as [okay-scala](https://github.com/okay-effects/okay-scala) has them, in two
+layers with one set of handlers:
+
+- CONTEXTS: a program a plain Zig function, its effects the handlers of a context it is given — as Zig gives
+  `Allocator` and `Io`. An operation is a call, inlined: a tick of a counter is a quarter of a nanosecond.
+- THE MACHINE: a program as data, its type its value and its row of effects; a handler takes an effect out of the row
+  and may resume the rest of the program once, twice, or never — for what needs it (abort, choice, resuming twice).
+
+```zig
+/// a plain function: its effects the context's, each operation a call — an effect missing, a compile error
+fn greet(cx: anytype) usize {
+    ok.needs(@TypeOf(cx), .{ Name, Counter });
+    const who = cx.op(Name, .ask, {});
+    const n = cx.op(Counter, .get, {});
+    cx.op(Counter, .put, n + 1);
+    return who.len * 100 + n;
+}
+
+var cell: u32 = 7;
+const cx = ok.context(.{ Counter.Cell{ .s = &cell }, Name.Given{ .env = "Ann" } });
+_ = greet(cx);                                              // 307
+_ = greet(cx.observe(Audit{ … }));                          // each Counter operation seen first
+```
+
+A handler is a struct whose methods are the operations (`Counter.Cell`: `get`, `put`) and that says its effect
+(`pub const Effect = Counter`); the same struct answers the machine's `handleTail`. Observers (`cx.observe(o)`) see
+each operation of their effect before it is answered — the audit, at the one call every operation goes through.
+
+## The machine
 
 ```zig
 const ok = @import("okay");
@@ -31,6 +57,8 @@ const v = b.run(Counter.inCell(&b, Reader.given(&b, tick(&b, R), "Ann"), &cell))
 - `b.handle(E, p, h)`: `h.ret` and `h.op(b, op, k)`, `k.answer(b, .tag, value)` resuming the rest — any number of
   times (`Choose.all` answers every choice both ways). `b.handleTail(E, p, h)`: each operation a method of `h`, its
   answer in place.
+- STEPS instead of closures: `b.next(p, f)`, `b.chain(p, .{ double, save })`, `b.seq(.{ p, q, r })` — each step a
+  function `fn (*Build, A) R.Of(B)` declared once and named; `b.then(p, ctx, f)` when a step must hold a value.
 - Standard effects: `State`, `Reader`, `Writer`, `Fail`, `Choose`.
 - MEMORY: a run consumes its program — each node freed as soon as it is read, frames reused — so a loop runs in the
   memory of one turn (a million operations: 4 nodes, 3 frames). `b.share(p)` keeps a program for another run or for

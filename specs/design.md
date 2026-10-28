@@ -1,8 +1,8 @@
 # okay-zig — design (spec, 2026-10-28)
 
-Status: the data layer built — rows, typed places, the machine, `handle` and `handleTail`, State, Reader, Writer, Fail,
-Choose; memory a loop's turn, not its length; 8 tests (a million operations, `k` resumed twice, sharing), in Debug and
-ReleaseSafe. Next: the contexts layer; okay's wire.
+Status 2026-10-28: both layers built. The machine — rows, typed places, `handle` and `handleTail`, State, Reader,
+Writer, Fail, Choose; memory a loop's turn, not its length; steps (`next`, `chain`, `seq`). Contexts — `context`, `op`,
+`needs`, `observe`. 12 tests, in Debug and ReleaseSafe. Next: okay's wire, the family's TCK.
 
 ## Why it fits Zig
 
@@ -46,10 +46,32 @@ to make a node, so a user never casts.
 Measured (ReleaseFast, `zig build bench`): a tick (`get`, `put`, three binds), a million of them: 17–18 ns a tick
 (77 before); taken from memory in all, 4 nodes and 3 frames — 336 bytes, for a million ticks or for ten.
 
+## Steps: the machine without closures written
+
+A continuation in Zig is a function with no capture and the value it holds. Most continuations hold nothing but the
+row: they are STEPS, functions `fn (*Build, A) R.Of(B)` declared once (generic over the row by a function returning a
+struct of them) and named — `b.next(p, step)`, `b.chain(p, .{ step1, step2 })` (the types checked where two steps
+meet: one's value the next one's argument), `b.seq(.{ p, q, r })` (values dropped but the last). `b.then(p, ctx, f)`
+stays for the step that must hold a value.
+
+## The contexts layer (2026-10-28)
+
+Two ways to write a program, one set of handlers — the choice is what the program needs:
+
+- a CONTEXT (`src/cx.zig`): the program is a plain function given `cx`; `cx.op(E, .tag, payload)` calls the handler's
+  method of that name, its answer typed by `E.Answer(tag)`. The context is a tuple of handlers, each saying its effect
+  (`pub const Effect = E`); an effect it lacks is a compile error naming the context's (`needs` says it where a function
+  starts). As Zig itself passes `Allocator` and, since 0.16, `Io`.
+- OBSERVERS (`cx.observe(o)`): each operation of `o`'s effect shown to `o.seen(op)` before its answer — the audit, at
+  the one place every operation goes through. `cx.of(E)` is the handler itself: what is called on it is not observed.
+- No continuation in a context: abort, choice, resuming twice, a durable step are the machine's. The handler struct is
+  one: the context's `Counter.Cell` is the machine's `handleTail` handler.
+
+Measured (ReleaseFast): a tick through a context, each step kept from folding (`doNotOptimizeAway`), 0.25 ns — the
+cost of the variable; left alone, the compiler folds a million ticks into one addition. Through the machine, 20 ns.
+
 ## Next
 
-1. THE CONTEXTS LAYER: an effect as an interface passed in — as Zig's own `Allocator` and `Io` are (since 0.16 `main`
-   is given `Io`); a handler a struct implementing it; a call a call, inlined. For the effects answered in place; the
-   machine for the rest (abort, choice, resuming twice, durable steps, interceptors as data).
-2. okay's WIRE, so a Zig program runs under another language's handlers (the JVM's by its C ABI, as okay-lean and
+1. okay's WIRE, so a Zig program runs under another language's handlers (the JVM's by its C ABI, as okay-lean and
    okay-rust do); the family's TCK of scenarios.
+2. Interceptors that decide (a guard refusing an operation): Zig's errors — an operation's answer an error union.

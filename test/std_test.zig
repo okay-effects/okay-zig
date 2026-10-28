@@ -129,6 +129,36 @@ test "a million operations: the machine's stack its own, not the call stack" {
     try t.expectEqual(1_000_000, b.run(Counter.inCell(&b, loop(&b, R, 1_000_000), &cell)));
 }
 
+/// steps declared once, for any row with Counter: each a function of the value before
+fn Steps(comptime R: type) type {
+    return struct {
+        pub fn double(b: *Build, n: u32) R.Of(u32) {
+            return b.pure(u32, R, n * 2);
+        }
+        pub fn save(b: *Build, n: u32) R.Of(u32) {
+            return b.seq(.{ Counter.put(b, R, n), Counter.put(b, R, n + 1), b.pure(u32, R, n) });
+        }
+        pub fn tick(b: *Build, n: u32) R.Of(u32) {
+            return b.seq(.{ Counter.put(b, R, n + 1), b.pure(u32, R, n) });
+        }
+    };
+}
+
+test "steps: a chain of named functions, no closure written; seq of many" {
+    var a = arena();
+    defer a.deinit();
+    var b = Build{ .arena = a.allocator() };
+    const R = ok.Row(.{Counter});
+    const St = Steps(R);
+    var cell: u32 = 5;
+    // get, double, save: 5 → 10, the state 11 (save puts n, then n + 1)
+    try t.expectEqual(10, b.run(Counter.inCell(&b, b.chain(Counter.get(&b, R), .{ St.double, St.save }), &cell)));
+    try t.expectEqual(11, cell);
+    // tick as a step: next, no context
+    try t.expectEqual(11, b.run(Counter.inCell(&b, b.next(Counter.get(&b, R), St.tick), &cell)));
+    try t.expectEqual(12, cell);
+}
+
 test "a program shared runs again; one shared inside another runs in each place" {
     var a = arena();
     defer a.deinit();

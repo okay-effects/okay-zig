@@ -25,6 +25,7 @@ pub fn State(comptime S: type) type {
         }
         /// in place: the state in a cell the caller holds
         pub const Cell = struct {
+            pub const Effect = Self;
             s: *S,
             pub fn get(self: Cell) S {
                 return self.s.*;
@@ -54,6 +55,7 @@ pub fn Reader(comptime E: type) type {
             return b.perform(R, Self, .ask, {});
         }
         pub const Given = struct {
+            pub const Effect = Self;
             env: E,
             pub fn ask(self: Given) E {
                 return self.env;
@@ -80,6 +82,7 @@ pub fn Writer(comptime W: type) type {
         }
         /// in place: what is told appended to a list in the build's arena
         pub const Collect = struct {
+            pub const Effect = Self;
             told: *std.ArrayList(W),
             arena: std.mem.Allocator,
             pub fn tell(self: Collect, w: W) void {

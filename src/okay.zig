@@ -203,9 +203,9 @@ pub const Build = struct {
         } else b.nodes.put(n);
     }
 
-    fn push(b: *Build, next: ?*Frame, kind: @FieldType(Frame, "kind"), shared: bool) *Frame {
+    fn push(b: *Build, below: ?*Frame, kind: @FieldType(Frame, "kind"), shared: bool) *Frame {
         const f = b.frames.get(b.arena);
-        f.* = .{ .next = next, .shared = shared, .kind = kind };
+        f.* = .{ .next = below, .shared = shared, .kind = kind };
         return f;
     }
 
@@ -227,9 +227,9 @@ pub const Build = struct {
                         cur = k.call(k.ctx, b, ret);
                         keep = cur.shared;
                     },
-                    .seq => |next| {
-                        cur = next;
-                        keep = f.shared or next.shared;
+                    .seq => |second| {
+                        cur = second;
+                        keep = f.shared or second.shared;
                     },
                     .handle => |h| {
                         cur = h.h.ret(h.h.ctx, b, ret);
@@ -377,6 +377,39 @@ pub const Build = struct {
         return .{ .node = b.node(.{ .seq = .{ .first = p.node, .then = q.node } }) };
     }
 
+    /// `p`, then the STEP `f(b, its value)` — a step a function that holds nothing, declared once and named
+    pub fn next(b: *Build, p: anytype, comptime f: anytype) ReturnOf(f) {
+        const P = @TypeOf(p);
+        comptime if (P.Effects != ReturnOf(f).Effects)
+            @compileError("next: " ++ @typeName(P.Effects) ++ " and " ++ @typeName(ReturnOf(f).Effects) ++
+                " are not one row");
+        const W = struct {
+            fn call(_: Val, bb: *Build, v: Val) *Node {
+                return f(bb, Val.take(P.Value, v)).node;
+            }
+        };
+        return .{ .node = b.bindNode(p.node, .{}, W.call) };
+    }
+
+    /// programs one after another, each value but the last dropped: `b.seq(.{ p, q, r })`
+    pub fn seq(b: *Build, ps: anytype) @TypeOf(ps[ps.len - 1]) {
+        return b.seqFrom(ps, 0);
+    }
+    fn seqFrom(b: *Build, ps: anytype, comptime i: usize) @TypeOf(ps[ps.len - 1]) {
+        if (i == ps.len - 1) return ps[i];
+        return b.andThen(ps[i], b.seqFrom(ps, i + 1));
+    }
+
+    /// `p` through STEPS, each given the value before: `b.chain(p, .{ double, save })`, each a function
+    /// `fn (*Build, A) R.Of(B)` — its types the steps' own, checked where they meet
+    pub fn chain(b: *Build, p: anytype, comptime steps: anytype) ReturnOf(steps[steps.len - 1]) {
+        return b.chainFrom(p, steps, 0);
+    }
+    fn chainFrom(b: *Build, p: anytype, comptime steps: anytype, comptime i: usize) ReturnOf(steps[steps.len - 1]) {
+        if (i == steps.len - 1) return b.next(p, steps[i]);
+        return b.chainFrom(b.next(p, steps[i]), steps, i + 1);
+    }
+
     /// `p` with `E` handled by `h`: `h.ret(b, a)` its return, `h.op(b, op, k)` each operation with the rest of the
     /// program `k` (`k.answer(b, tag, value)` resumes it — once, twice, or never). The program's row without `E`.
     pub fn handle(b: *Build, comptime E: type, p: anytype, h: anytype) HandledBy(@TypeOf(h)) {
@@ -477,3 +510,8 @@ fn HandledBy(comptime H: type) type {
 
 /// the standard effects
 pub const effects = @import("std.zig");
+
+/// the contexts layer: a program a plain function, its effects the handlers it is given
+pub const Context = @import("cx.zig").Context;
+pub const context = @import("cx.zig").context;
+pub const needs = @import("cx.zig").needs;

@@ -42,4 +42,25 @@ pub fn main(init: std.process.Init) void {
         std.debug.print(fmt, .{ round, ms, b.nodes.made, b.frames.made, bytes });
     }
     std.debug.print("best: {d} ns per tick (get + put + binds)\n", .{best / n});
+
+    // the same ticks through a CONTEXT: a plain loop, each operation a call on the handler
+    var cell: u32 = 0;
+    const cx = ok.context(.{Counter.Cell{ .s = &cell }});
+    var fastest: u64 = std.math.maxInt(u64);
+    round = 0;
+    while (round < 5) : (round += 1) {
+        cell = 0;
+        const start = std.Io.Timestamp.now(io, .awake);
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            const v = cx.op(Counter, .get, {});
+            std.mem.doNotOptimizeAway(v); // each step kept: the loop not folded into one addition
+            cx.op(Counter, .put, v + 1);
+        }
+        std.mem.doNotOptimizeAway(cell);
+        const ns: u64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds - start.nanoseconds);
+        fastest = @min(fastest, ns);
+    }
+    if (cell != n) @panic("wrong");
+    std.debug.print("context: {d} ps per tick\n", .{fastest * 1000 / n});
 }
