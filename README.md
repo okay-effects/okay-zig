@@ -24,6 +24,10 @@ _ = greet(cx);                                              // 307
 _ = greet(cx.observe(Audit{ … }));                          // each Counter operation seen first
 ```
 
+GUARDS decide: `cx.guard(g)`, `g.decide(op)` returning an error of its own to refuse — and then that effect's
+operations answer an error union, so the program says `try cx.op(Counter, .put, n)` and a refusal leaves it as Zig's
+errors do. An effect with no guard answers plainly: the types say which operations may be refused.
+
 A handler is a struct whose methods are the operations (`Counter.Cell`: `get`, `put`) and that says its effect
 (`pub const Effect = Counter`); the same struct answers the machine's `handleTail`. Observers (`cx.observe(o)`) see
 each operation of their effect before it is answered — the audit, at the one call every operation goes through.
@@ -63,6 +67,15 @@ const v = b.run(Counter.inCell(&b, Reader.given(&b, tick(&b, R), "Ann"), &cell))
 - MEMORY: a run consumes its program — each node freed as soon as it is read, frames reused — so a loop runs in the
   memory of one turn (a million operations: 4 nodes, 3 frames). `b.share(p)` keeps a program for another run or for
   a second place; a program run twice unshared is a panic in Debug builds, saying so.
+
+## okay's wire
+
+Zig programs run under another language's handlers: `ok.wire` serves them to okay's hosts on
+[okay's wire](https://github.com/okay-effects) — on a child's pipes (`zig build worker`: `zig-out/bin/zig-worker`) or
+in the host's own process through its C ABI (`zig-out/lib/libokay-zig-worker`). A program performs `Host` operations
+(`Host.call(b, R, "price_of", args)`) or a typed effect sent by `remote`; each goes to the host, which resumes the rest
+any number of times — okay's `WireConformance` passes (multi-shot across the link, typed callbacks under the host's
+`Reader`, tables, held values, failures by name): `conformance/TestZigLinks.scala`.
 
 Zig 0.17.0. `zig build test`, `zig build bench -Doptimize=ReleaseFast`. One of the
 [okay-effects](https://github.com/okay-effects) family. The design: [specs/design.md](specs/design.md).

@@ -2,7 +2,8 @@
 
 Status 2026-10-28: both layers built. The machine — rows, typed places, `handle` and `handleTail`, State, Reader,
 Writer, Fail, Choose; memory a loop's turn, not its length; steps (`next`, `chain`, `seq`). Contexts — `context`, `op`,
-`needs`, `observe`. 12 tests, in Debug and ReleaseSafe. Next: okay's wire, the family's TCK.
+`needs`, `observe`, `guard`. okay's wire: a worker on pipes and on okay's C ABI, okay's `WireConformance` passed.
+20 tests, in Debug and ReleaseSafe.
 
 ## Why it fits Zig
 
@@ -70,8 +71,44 @@ Two ways to write a program, one set of handlers — the choice is what the prog
 Measured (ReleaseFast): a tick through a context, each step kept from folding (`doNotOptimizeAway`), 0.25 ns — the
 cost of the variable; left alone, the compiler folds a million ticks into one addition. Through the machine, 20 ns.
 
+## Guards: interceptors that decide (2026-10-28)
+
+- A GUARD is a struct that says its effect (`pub const Effect = E`) and decides each operation of it:
+  `decide(self, op) !void` — returning is allowing; an error of the guard's own refuses it, by name.
+- `cx.guard(g)`: with a guard, `E`'s operations answer an ERROR UNION, `Refusal(E)!E.Answer(tag)` — the program says
+  `try cx.op(…)`, and a refusal leaves the function as Zig's errors do. An effect with no guard answers plainly: the
+  types say which operations may be refused (`Cx.Answered(E, tag)`), and a refusal unhandled is a compile error.
+- Several guards of one effect: each asked in order, the first error refuses; their errors one set (`Cx.Refusal(E)`).
+- Order: observers see the operation, then guards decide, then the handler answers — the audit sees the refused ones
+  too; a refused operation is never answered.
+- Contexts only: a guard in the machine is a handler around the effect that answers or fails (`Fail`) — written
+  with `handle` already.
+
+## okay's wire (2026-10-28)
+
+`src/wire.zig`: Zig programs served to okay's hosts (okay's `ForeignWorker`; okay-py's `wire.txt` the protocol), as
+okay-lean serves Lean's.
+
+- The host's operations are ONE effect, `Host`: `request` (a name, JSON arguments; its answer the host's value or its
+  condition) and `fail` (a condition by name). `Host.call(b, R, name, args)` and `Host.fail`. A program the host
+  starts is `fn (*Build, []const Value) Remote.Of(Value)`, served by name or `module:name`.
+- A TYPED effect goes to the host by `remote(b, E, p)`: each operation by its tag's name, its payload the arguments
+  (a struct's fields each one), its answer decoded as the operation's (`TypeError` if the host's is not one).
+- The worker runs a program under a handler of `Host` that does not resume: an operation stops the run with its `k`,
+  kept by (run, k) id; `continue` resumes that `k` — any number of times, the machine's templates — so the host's
+  handler may be multi-shot (okay's `runChoice`). A RUN IS AN ARENA: its program, rests and answers; `forget` frees it.
+- Values are `std.json.Value`; okay's tagged numbers are plain inside (`{"t": "f"}` a float, `{"t": "int"}`, NaN) and
+  tagged going out (a whole float stays a double). Held values (`call … held`) live in their own arenas until
+  `release`; a released ref is a `LookupError`.
+- The worker on stdin/stdout (`Worker.serve`, `conformance/worker.zig`) and in the host's process through FFM
+  (`conformance/ffi.zig`: `okay_exchange`, `okay_free`). JSON lines, no compression. Not served: direct style and
+  streams (a muxed worker's), as for Lean and Haskell.
+- Checked: `test/wire_test.zig` replays transcripts; okay's own `WireConformance` (`conformance/TestZigLinks.scala`,
+  run in a clone of okay): 12 passed over pipes and FFM — multi-shot across the link, a typed effect under the host's
+  `Reader`, tables, held values, failures by name.
+
 ## Next
 
-1. okay's WIRE, so a Zig program runs under another language's handlers (the JVM's by its C ABI, as okay-lean and
-   okay-rust do); the family's TCK of scenarios.
-2. Interceptors that decide (a guard refusing an operation): Zig's errors — an operation's answer an error union.
+1. The family's TCK of scenarios beyond the wire's (okay-rust's open item too): one set run by every language.
+2. A guard on the wire: a host's policy deciding a Zig program's operations (okay-guard's `Action`), or a Zig guard
+  over the host's.

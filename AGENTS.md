@@ -12,5 +12,8 @@ Read before anything else, then `specs/design.md`: a change of design is a chang
   language changes between versions: a newer one is a deliberate move, the whole suite run.
 - `zig build test`; `zig build bench -Doptimize=ReleaseFast`. Lines at most 120 wide. Commits: plain messages, no
   attribution trailers.
+- `src/wire.zig`: okay's wire (okay-py's `wire.txt`); `conformance/`: the programs okay's `WireConformance` calls, the
+  stdio worker, the C ABI library (`zig build worker -Doptimize=ReleaseSafe`) and `TestZigLinks.scala` — run it in a
+  CLONE of okay (`git clone --local ~/work/my/okay /tmp/okay-conf`), never in okay's own tree: its header says how.
 - The erasure (`Any`, `box`, `unbox`) is the machine's alone; the typed words are the only way in, so no user code
   casts. `zig fmt` keeps the form; lines over 120 are wrapped by hand.

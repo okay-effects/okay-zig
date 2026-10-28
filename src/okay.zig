@@ -469,10 +469,13 @@ pub const Build = struct {
 
 /// A PROGRAM: its value `A`, its effects the row `R` (a `Row`, or a tuple of effects) — `A ! R`
 pub fn Eff(comptime A: type, comptime R: anytype) type {
+    return EffOf(A, rowOf(R)); // `.{ F, G }` and `Row(.{ F, G })`: one type
+}
+fn EffOf(comptime A: type, comptime R: type) type {
     return struct {
         node: *Node,
         pub const Value = A;
-        pub const Effects = rowOf(R);
+        pub const Effects = R;
     };
 }
 
@@ -515,3 +518,6 @@ pub const effects = @import("std.zig");
 pub const Context = @import("cx.zig").Context;
 pub const context = @import("cx.zig").context;
 pub const needs = @import("cx.zig").needs;
+
+/// okay's wire: Zig programs served to okay's hosts, run under their handlers
+pub const wire = @import("wire.zig");
