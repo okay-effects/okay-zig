@@ -36,8 +36,7 @@ pub fn main(init: std.process.Init) void {
         const ns: u64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds - start.nanoseconds);
         if (got != n) @panic("wrong");
         best = @min(best, ns);
-        const mb = arena.queryCapacity() / (1024 * 1024);
-        std.debug.print("round {d}: {d} ms, arena {d} MB\n", .{ round, ns / 1_000_000, mb });
+        std.debug.print("round {d}: {d} ms; nodes made {d}, frames made {d} ({d} bytes)\n", .{ round, ns / 1_000_000, b.nodes.made, b.frames.made, b.nodes.made * @sizeOf(ok.Node) + b.frames.made * 48 });
     }
     std.debug.print("best: {d} ns per tick (get + put + binds)\n", .{best / n});
 }

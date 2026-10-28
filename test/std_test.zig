@@ -12,10 +12,10 @@ fn arena() std.heap.ArenaAllocator {
     return std.heap.ArenaAllocator.init(t.allocator);
 }
 
-/// a tick: the state read, one more put, the old value the program's
-fn tick(b: *Build, comptime R: anytype) Eff(u32, R) {
+/// a tick: the state read, one more put, the old value the program's — `R.Of(u32)` is `u32 ! R`
+fn tick(b: *Build, comptime R: type) R.Of(u32) {
     return b.then(Counter.get(b, R), {}, struct {
-        fn f(_: void, bb: *Build, n: u32) Eff(u32, R) {
+        fn f(_: void, bb: *Build, n: u32) R.Of(u32) {
             return bb.map(Counter.put(bb, R, n + 1), n, struct {
                 fn g(old: u32, _: void) u32 {
                     return old;
@@ -51,9 +51,10 @@ test "two effects, one row, handled in either order; a row written as R.with(E)"
         }
     }.f);
     var cell: u32 = 7;
-    try t.expectEqual(307, b.run(Name.given(&b, Counter.inCell(&b, p, &cell), "Ann")));
+    const shared = b.share(p); // run twice: kept by its runs
+    try t.expectEqual(307, b.run(Name.given(&b, Counter.inCell(&b, shared, &cell), "Ann")));
     cell = 7;
-    try t.expectEqual(307, b.run(Counter.inCell(&b, Name.given(&b, p, "Ann"), &cell)));
+    try t.expectEqual(307, b.run(Counter.inCell(&b, Name.given(&b, shared, "Ann"), &cell)));
 }
 
 test "fail: the rest dropped, the failure the value; what was done before it stays" {
@@ -110,10 +111,10 @@ test "choose under state: the cell is one, the choices many — handled outside 
 }
 
 /// a loop of `n` ticks, built as it runs
-fn loop(b: *Build, comptime R: anytype, n: u32) Eff(u32, R) {
+fn loop(b: *Build, comptime R: type, n: u32) R.Of(u32) {
     if (n == 0) return Counter.get(b, R);
     return b.then(tick(b, R), n, struct {
-        fn f(m: u32, bb: *Build, _: u32) Eff(u32, R) {
+        fn f(m: u32, bb: *Build, _: u32) R.Of(u32) {
             return loop(bb, R, m - 1);
         }
     }.f);
@@ -126,6 +127,19 @@ test "a million operations: the machine's stack its own, not the call stack" {
     const R = ok.Row(.{Counter});
     var cell: u32 = 0;
     try t.expectEqual(1_000_000, b.run(Counter.inCell(&b, loop(&b, R, 1_000_000), &cell)));
+}
+
+test "a program shared runs again; one shared inside another runs in each place" {
+    var a = arena();
+    defer a.deinit();
+    var b = Build{ .arena = a.allocator() };
+    const R = ok.Row(.{Counter});
+    var cell: u32 = 0;
+    const once = b.share(tick(&b, R)); // used twice in one program, then the program run twice
+    const twice = b.share(b.andThen(once, once));
+    try t.expectEqual(1, b.run(Counter.inCell(&b, twice, &cell)));
+    try t.expectEqual(3, b.run(Counter.inCell(&b, twice, &cell)));
+    try t.expectEqual(4, cell);
 }
 
 test "writer: told in order" {

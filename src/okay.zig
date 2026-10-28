@@ -34,6 +34,11 @@ pub fn Row(comptime members: anytype) type {
             return rowWithout(list, i, 0, .{});
         }
 
+        /// a program of this row, its value `A`: `R.Of(u32)` is `u32 ! R`
+        pub fn Of(comptime A: type) type {
+            return Eff(A, @This());
+        }
+
         /// whether `E` is in the row
         pub fn has(comptime E: type) bool {
             inline for (list) |X| if (X == E) return true;
@@ -56,161 +61,274 @@ fn rowOf(comptime R: anytype) type {
 
 // ------------------------------------------------------------------------------------------------ the machine
 
-/// a value, erased: the machine's own; the typed words below put and take them, by the types the compiler knows
-pub const Any = *const anyopaque;
+const builtin = @import("builtin");
 
 fn oom() noreturn {
     @panic("okay-zig: out of memory");
 }
 
-fn box(a: Allocator, comptime T: type, v: T) Any {
-    const p = a.create(T) catch oom();
-    p.* = v;
-    return @ptrCast(p);
-}
+/// A VALUE, as the machine carries it: kept IN the value when it is small (16 bytes, a slice's size, or less), else
+/// in the arena and its address kept. The typed words put and take it by the types the compiler knows.
+pub const Val = struct {
+    w: [2]u64 = .{ 0, 0 },
 
-fn unbox(comptime T: type, p: Any) T {
-    const q: *const T = @ptrCast(@alignCast(p));
-    return q.*;
-}
+    fn inline_(comptime T: type) bool {
+        return @sizeOf(T) <= 16 and @alignOf(T) <= 8;
+    }
+    fn put(a: Allocator, comptime T: type, v: T) Val {
+        var out = Val{};
+        if (comptime inline_(T)) {
+            const p: *T = @ptrCast(@alignCast(&out.w));
+            p.* = v;
+        } else {
+            const p = a.create(T) catch oom();
+            p.* = v;
+            out.w[0] = @intFromPtr(p);
+        }
+        return out;
+    }
+    fn take(comptime T: type, v: Val) T {
+        if (comptime inline_(T)) {
+            const p: *const T = @ptrCast(@alignCast(&v.w));
+            return p.*;
+        }
+        const p: *const T = @ptrFromInt(@as(usize, @intCast(v.w[0])));
+        return p.*;
+    }
+};
 
 /// the rest of a bind: a function and what it holds — a closure, made by hand
 pub const Cont = struct {
-    ctx: Any,
-    call: *const fn (ctx: Any, b: *Build, value: Any) *const Node,
+    ctx: Val,
+    call: *const fn (ctx: Val, b: *Build, value: Val) *Node,
 };
 
 /// a handler, erased: its return clause and its operation clause, or (`answer`) its answer in place
 pub const Handling = struct {
-    ctx: Any,
-    ret: *const fn (ctx: Any, b: *Build, value: Any) *const Node,
-    op: ?*const fn (ctx: Any, b: *Build, op: Any, k: *const Captured) *const Node,
-    answer: ?*const fn (ctx: Any, b: *Build, op: Any) Any,
+    ctx: Val,
+    ret: *const fn (ctx: Val, b: *Build, value: Val) *Node,
+    op: ?*const fn (ctx: Val, b: *Build, op: Val, k: *const Captured) *Node,
+    answer: ?*const fn (ctx: Val, b: *Build, op: Val) Val,
 };
 
-/// A PROGRAM AS DATA
-pub const Node = union(enum) {
-    value: Any,
-    /// an operation of the effect at `place` in the program's row
-    perform: struct { place: usize, op: Any },
-    bind: struct { prog: *const Node, k: Cont },
-    /// `prog` with the effect at `place` handled by `h`
-    handle: struct { prog: *const Node, place: usize, h: *const Handling },
-    /// the rest of a program given back its operation's answer
-    resume_: struct { k: *const Captured, value: Any },
+/// A PROGRAM AS DATA. A run CONSUMES it — each node freed as soon as the machine has read it — unless it is
+/// `shared` (`Build.share`): then it, and what it holds, is kept for another run.
+pub const Node = struct {
+    shared: bool = false,
+    kind: Kind,
+
+    pub const Kind = union(enum) {
+        value: Val,
+        /// an operation of the effect at `place` in the program's row
+        perform: struct { place: usize, op: Val },
+        bind: struct { prog: *Node, k: Cont },
+        /// `first`, its value dropped, then `then`
+        seq: struct { first: *Node, then: *Node },
+        /// `prog` with the effect at `place` handled by `h`
+        handle: struct { prog: *Node, place: usize, h: *const Handling },
+        /// the rest of a program given back its operation's answer
+        resume_: struct { k: *const Captured, value: Val },
+        /// a node a run has freed (Debug builds keep it so): run again, it says so
+        dead,
+    };
 };
 
 const Frame = struct {
-    next: ?*const Frame,
+    next: ?*Frame,
+    /// in a captured `k`: its template, never freed — `k` may be resumed again
+    pinned: bool = false,
+    /// a copy of a template's frame: what it holds is the template's, kept
+    shared: bool = false,
     kind: union(enum) {
         bind: Cont,
+        seq: *Node,
         handle: struct { place: usize, h: *const Handling },
     },
 };
 
-/// `k`: the frames from the operation up to its handler, the handler's frame the last — kept, never changed, so a
-/// handler resumes it once, twice, or not at all
-pub const Captured = struct { top: *const Frame, handler: *const Frame };
+/// `k`: the frames from the operation up to its handler, the handler's frame the last — pinned, so a handler
+/// resumes it once, twice, or not at all
+pub const Captured = struct { top: *Frame, handler: *Frame };
 
-/// what programs are made with and run by: an arena, everything a run makes in it, freed with it
+/// a free list of `T`s: what a run frees, the next allocation takes again — memory a loop's size, not its length
+fn Pool(comptime T: type) type {
+    return struct {
+        free: ?*Slot = null,
+        /// how many were taken from memory, not from the free list: what a run's memory is made of
+        made: usize = 0,
+        const Slot = struct { next: ?*Slot };
+        comptime {
+            if (@sizeOf(T) < @sizeOf(Slot) or @alignOf(T) < @alignOf(Slot))
+                @compileError("a pool's item holds a pointer");
+        }
+        fn get(self: *@This(), a: Allocator) *T {
+            if (self.free) |s| {
+                self.free = s.next;
+                return @ptrCast(@alignCast(s));
+            }
+            self.made += 1;
+            return a.create(T) catch oom();
+        }
+        fn put(self: *@This(), p: *T) void {
+            const s: *Slot = @ptrCast(@alignCast(p));
+            s.* = .{ .next = self.free };
+            self.free = s;
+        }
+    };
+}
+
+/// what programs are made with and run by: an arena — what lasts the run — and the free lists of nodes and frames
 pub const Build = struct {
     arena: Allocator,
+    nodes: Pool(Node) = .{},
+    frames: Pool(Frame) = .{},
 
-    pub fn node(b: *Build, n: Node) *const Node {
-        const p = b.arena.create(Node) catch oom();
-        p.* = n;
+    pub fn node(b: *Build, kind: Node.Kind) *Node {
+        const p = b.nodes.get(b.arena);
+        p.* = .{ .kind = kind };
         return p;
     }
 
-    fn bindNode(b: *Build, prog: *const Node, ctx: Any, call: *const fn (Any, *Build, Any) *const Node) *const Node {
+    fn bindNode(b: *Build, prog: *Node, ctx: Val, call: *const fn (Val, *Build, Val) *Node) *Node {
         return b.node(.{ .bind = .{ .prog = prog, .k = .{ .ctx = ctx, .call = call } } });
     }
 
-    fn valueNode(b: *Build, v: Any) *const Node {
+    fn valueNode(b: *Build, v: Val) *Node {
         return b.node(.{ .value = v });
     }
 
-    /// the machine: a program of no effect left, run to its value
-    fn eval(b: *Build, start: *const Node) Any {
-        var cur = start;
-        var stack: ?*const Frame = null;
+    fn release(b: *Build, n: *Node) void {
+        if (builtin.mode == .debug) {
+            n.kind = .dead; // kept, poisoned: a program run twice is caught, not read freed
+        } else b.nodes.put(n);
+    }
+
+    fn push(b: *Build, next: ?*Frame, kind: @FieldType(Frame, "kind"), shared: bool) *Frame {
+        const f = b.frames.get(b.arena);
+        f.* = .{ .next = next, .shared = shared, .kind = kind };
+        return f;
+    }
+
+    /// THE MACHINE: a program of no effect left, run to its value. `ret` the value being returned to the stack;
+    /// `keep` whether the node at hand is kept (shared, or in a shared one)
+    fn eval(b: *Build, start: *Node) Val {
+        var cur: *Node = start;
+        var keep = start.shared;
+        var stack: ?*Frame = null;
+        var ret: Val = .{};
+        var returning = false;
         while (true) {
-            switch (cur.*) {
-                .bind => |n| {
-                    stack = b.frame(.{ .next = stack, .kind = .{ .bind = n.k } });
-                    cur = n.prog;
-                },
-                .handle => |n| {
-                    stack = b.frame(.{ .next = stack, .kind = .{ .handle = .{ .place = n.place, .h = n.h } } });
-                    cur = n.prog;
-                },
+            if (returning) {
+                const f = stack orelse return ret;
+                stack = f.next;
+                returning = false;
+                switch (f.kind) {
+                    .bind => |k| {
+                        cur = k.call(k.ctx, b, ret);
+                        keep = cur.shared;
+                    },
+                    .seq => |next| {
+                        cur = next;
+                        keep = f.shared or next.shared;
+                    },
+                    .handle => |h| {
+                        cur = h.h.ret(h.h.ctx, b, ret);
+                        keep = cur.shared;
+                    },
+                }
+                b.frames.put(f); // a live frame is never pinned: a template is off the stack
+                continue;
+            }
+            const n = cur;
+            const kept = keep or n.shared;
+            switch (n.kind) {
+                .dead => @panic("okay-zig: a program run a second time — `b.share(p)` keeps one for another run"),
                 .value => |v| {
-                    const f = stack orelse return v;
-                    stack = f.next;
-                    cur = switch (f.kind) {
-                        .bind => |k| k.call(k.ctx, b, v),
-                        .handle => |h| h.h.ret(h.h.ctx, b, v),
-                    };
+                    ret = v;
+                    returning = true;
+                },
+                .bind => |x| {
+                    stack = b.push(stack, .{ .bind = x.k }, kept);
+                    cur = x.prog;
+                    keep = kept;
+                },
+                .seq => |x| {
+                    stack = b.push(stack, .{ .seq = x.then }, kept);
+                    cur = x.first;
+                    keep = kept;
+                },
+                .handle => |x| {
+                    stack = b.push(stack, .{ .handle = .{ .place = x.place, .h = x.h } }, kept);
+                    cur = x.prog;
+                    keep = kept;
                 },
                 .perform => |p| {
                     // up the stack to the operation's handler, its place renumbered past each other handler
                     var place = p.place;
                     var f = stack;
-                    const found: *const Frame = while (f) |fr| : (f = fr.next) {
+                    const found: *Frame = while (f) |fr| : (f = fr.next) {
                         switch (fr.kind) {
                             .handle => |h| {
                                 if (h.place == place) break fr;
                                 if (place > h.place) place -= 1;
                             },
-                            .bind => {},
+                            else => {},
                         }
                     } else @panic("okay-zig: an operation no handler takes (the types should have said so)");
                     const h = found.kind.handle.h;
                     if (h.answer) |answer| {
-                        cur = b.valueNode(answer(h.ctx, b, p.op)); // in place: the stack as it is
+                        ret = answer(h.ctx, b, p.op); // in place: the stack as it is
+                        returning = true;
                     } else {
+                        // the segment up to the handler pinned: a template for every resumption
+                        var g: *Frame = stack.?;
+                        while (true) : (g = g.next.?) {
+                            g.pinned = true;
+                            if (g == found) break;
+                        }
                         const k = b.arena.create(Captured) catch oom();
                         k.* = .{ .top = stack.?, .handler = found };
                         stack = found.next;
                         cur = h.op.?(h.ctx, b, p.op, k);
+                        keep = cur.shared;
                     }
                 },
                 .resume_ => |r| {
                     stack = b.reinstate(r.k, stack);
-                    cur = b.valueNode(r.value);
+                    ret = r.value;
+                    returning = true;
                 },
             }
+            if (!kept) b.release(n);
         }
     }
 
-    fn frame(b: *Build, f: Frame) *const Frame {
-        const p = b.arena.create(Frame) catch oom();
-        p.* = f;
+    /// `k`'s frames on `base`: copied, marked shared — the template stays for the next resumption
+    fn reinstate(b: *Build, k: *const Captured, base: ?*Frame) *Frame {
+        var t: *Frame = k.top;
+        const first = b.push(null, t.kind, true);
+        var last = first;
+        while (t != k.handler) {
+            t = t.next.?;
+            const c = b.push(null, t.kind, true);
+            last.next = c;
+            last = c;
+        }
+        last.next = base;
+        return first;
+    }
+
+    /// `p` kept by its runs: run again, or used twice in one program
+    pub fn share(_: *Build, p: anytype) @TypeOf(p) {
+        p.node.shared = true;
         return p;
-    }
-
-    /// `k`'s frames on `base`: copied, so the same `k` is reinstated again elsewhere
-    fn reinstate(b: *Build, k: *const Captured, base: ?*const Frame) *const Frame {
-        var segment: std.ArrayList(*const Frame) = .empty;
-        var f: *const Frame = k.top;
-        while (true) : (f = f.next.?) {
-            segment.append(b.arena, f) catch oom();
-            if (f == k.handler) break;
-        }
-        var below: ?*const Frame = base;
-        var i = segment.items.len;
-        while (i > 0) {
-            i -= 1;
-            below = b.frame(.{ .next = below, .kind = segment.items[i].kind });
-        }
-        return below.?;
     }
 
     // -------------------------------------------------------------------------------------------- the words
 
     /// `a`, a program of row `R` with no operation
     pub fn pure(b: *Build, comptime A: type, comptime R: anytype, a: A) Eff(A, R) {
-        return .{ .node = b.valueNode(box(b.arena, A, a)) };
+        return .{ .node = b.valueNode(Val.put(b.arena, A, a)) };
     }
 
     /// an operation of `E`, its answer the program's value: `E` must be in `R`
@@ -223,7 +341,7 @@ pub const Build = struct {
     ) Eff(E.Answer(tag), R) {
         const place = comptime rowOf(R).place(E);
         const op = @unionInit(E.Op, @tagName(tag), payload);
-        return .{ .node = b.node(.{ .perform = .{ .place = place, .op = box(b.arena, E.Op, op) } }) };
+        return .{ .node = b.node(.{ .perform = .{ .place = place, .op = Val.put(b.arena, E.Op, op) } }) };
     }
 
     /// `p`, then `f(ctx, b, its value)`: `ctx` is what `f` holds, `f` a function with no capture
@@ -234,11 +352,11 @@ pub const Build = struct {
         comptime if (P.Effects != Q.Effects)
             @compileError("then: " ++ @typeName(P.Effects) ++ " and " ++ @typeName(Q.Effects) ++ " are not one row");
         const W = struct {
-            fn call(c: Any, bb: *Build, v: Any) *const Node {
-                return f(unbox(Ctx, c), bb, unbox(P.Value, v)).node;
+            fn call(c: Val, bb: *Build, v: Val) *Node {
+                return f(Val.take(Ctx, c), bb, Val.take(P.Value, v)).node;
             }
         };
-        return .{ .node = b.bindNode(p.node, box(b.arena, Ctx, ctx), W.call) };
+        return .{ .node = b.bindNode(p.node, Val.put(b.arena, Ctx, ctx), W.call) };
     }
 
     /// `p`'s value through `f(ctx, it)`
@@ -247,23 +365,16 @@ pub const Build = struct {
         const Ctx = @TypeOf(ctx);
         const B = ReturnOfPlain(f);
         const W = struct {
-            fn call(c: Any, bb: *Build, v: Any) *const Node {
-                return bb.valueNode(box(bb.arena, B, f(unbox(Ctx, c), unbox(P.Value, v))));
+            fn call(c: Val, bb: *Build, v: Val) *Node {
+                return bb.valueNode(Val.put(bb.arena, B, f(Val.take(Ctx, c), Val.take(P.Value, v))));
             }
         };
-        return .{ .node = b.bindNode(p.node, box(b.arena, Ctx, ctx), W.call) };
+        return .{ .node = b.bindNode(p.node, Val.put(b.arena, Ctx, ctx), W.call) };
     }
 
     /// `p`, then `q`, its value dropped
     pub fn andThen(b: *Build, p: anytype, q: anytype) @TypeOf(q) {
-        const Q = @TypeOf(q);
-        const W = struct {
-            fn call(c: Any, _: *Build, _: Any) *const Node {
-                return unbox(*const Node, c);
-            }
-        };
-        _ = Q;
-        return .{ .node = b.bindNode(p.node, box(b.arena, *const Node, q.node), W.call) };
+        return .{ .node = b.node(.{ .seq = .{ .first = p.node, .then = q.node } }) };
     }
 
     /// `p` with `E` handled by `h`: `h.ret(b, a)` its return, `h.op(b, op, k)` each operation with the rest of the
@@ -277,15 +388,15 @@ pub const Build = struct {
             @compileError("handle: the handler's row is " ++ @typeName(Out.Effects) ++ ", the program's without " ++
                 @typeName(E) ++ " is " ++ @typeName(P.Effects.without(place)));
         const W = struct {
-            fn ret(c: Any, bb: *Build, v: Any) *const Node {
-                return unbox(H, c).ret(bb, unbox(P.Value, v)).node;
+            fn ret(c: Val, bb: *Build, v: Val) *Node {
+                return Val.take(H, c).ret(bb, Val.take(P.Value, v)).node;
             }
-            fn op(c: Any, bb: *Build, o: Any, k: *const Captured) *const Node {
-                return unbox(H, c).op(bb, unbox(E.Op, o), Resume(E, Out){ .k = k }).node;
+            fn op(c: Val, bb: *Build, o: Val, k: *const Captured) *Node {
+                return Val.take(H, c).op(bb, Val.take(E.Op, o), Resume(E, Out){ .k = k }).node;
             }
         };
         const handling = b.arena.create(Handling) catch oom();
-        handling.* = .{ .ctx = box(b.arena, H, h), .ret = W.ret, .op = W.op, .answer = null };
+        handling.* = .{ .ctx = Val.put(b.arena, H, h), .ret = W.ret, .op = W.op, .answer = null };
         return .{ .node = b.node(.{ .handle = .{ .prog = p.node, .place = place, .h = handling } }) };
     }
 
@@ -296,22 +407,22 @@ pub const Build = struct {
         const H = @TypeOf(h);
         const place = comptime P.Effects.place(E);
         const W = struct {
-            fn ret(_: Any, bb: *Build, v: Any) *const Node {
+            fn ret(_: Val, bb: *Build, v: Val) *Node {
                 return bb.valueNode(v);
             }
-            fn answer(c: Any, bb: *Build, o: Any) Any {
-                const self = unbox(H, c);
-                switch (unbox(E.Op, o)) {
+            fn answer(c: Val, bb: *Build, o: Val) Val {
+                const self = Val.take(H, c);
+                switch (Val.take(E.Op, o)) {
                     inline else => |payload, tag| {
                         const method = @field(H, @tagName(tag));
                         const a = if (@TypeOf(payload) == void) method(self) else method(self, payload);
-                        return box(bb.arena, E.Answer(tag), a);
+                        return Val.put(bb.arena, E.Answer(tag), a);
                     },
                 }
             }
         };
         const handling = b.arena.create(Handling) catch oom();
-        handling.* = .{ .ctx = box(b.arena, H, h), .ret = W.ret, .op = null, .answer = W.answer };
+        handling.* = .{ .ctx = Val.put(b.arena, H, h), .ret = W.ret, .op = null, .answer = W.answer };
         return .{ .node = b.node(.{ .handle = .{ .prog = p.node, .place = place, .h = handling } }) };
     }
 
@@ -319,14 +430,14 @@ pub const Build = struct {
     pub fn run(b: *Build, p: anytype) @TypeOf(p).Value {
         const P = @TypeOf(p);
         comptime if (P.Effects.len != 0) @compileError("run: effects left unhandled: " ++ @typeName(P.Effects));
-        return unbox(P.Value, b.eval(p.node));
+        return Val.take(P.Value, b.eval(p.node));
     }
 };
 
 /// A PROGRAM: its value `A`, its effects the row `R` (a `Row`, or a tuple of effects) — `A ! R`
 pub fn Eff(comptime A: type, comptime R: anytype) type {
     return struct {
-        node: *const Node,
+        node: *Node,
         pub const Value = A;
         pub const Effects = rowOf(R);
     };
@@ -343,7 +454,8 @@ pub fn Resume(comptime E: type, comptime Out: type) type {
         k: *const Captured,
         /// the rest of the program, given `value` as the answer to its operation `tag`: a program of the handler's
         pub fn answer(self: @This(), b: *Build, comptime tag: std.meta.Tag(E.Op), value: E.Answer(tag)) Out {
-            return .{ .node = b.node(.{ .resume_ = .{ .k = self.k, .value = box(b.arena, E.Answer(tag), value) } }) };
+            const v = Val.put(b.arena, E.Answer(tag), value);
+            return .{ .node = b.node(.{ .resume_ = .{ .k = self.k, .value = v } }) };
         }
     };
 }

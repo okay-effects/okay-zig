@@ -1,7 +1,8 @@
 # okay-zig — design (spec, 2026-10-28)
 
 Status: the data layer built — rows, typed places, the machine, `handle` and `handleTail`, State, Reader, Writer, Fail,
-Choose; 7 tests (a million operations, `k` resumed twice). Next: the contexts layer; memory; okay's wire.
+Choose; memory a loop's turn, not its length; 8 tests (a million operations, `k` resumed twice, sharing), in Debug and
+ReleaseSafe. Next: the contexts layer; okay's wire.
 
 ## Why it fits Zig
 
@@ -26,17 +27,29 @@ resumed is that segment copied onto the stack where it is resumed — so `k` is 
 reinstated (deep handlers). The erasure — `Any`, `box`, `unbox` — is the machine's; the typed words are the only way
 to make a node, so a user never casts.
 
-## Measured (ReleaseFast, one machine)
+## Memory (2026-10-28)
 
-A tick (`get`, `put`, three binds), a million of them: 77 ns a tick. The arena holds 544 MB at the end: every node,
-frame and value is allocated and kept until the run ends.
+- A VALUE is carried in a `Val` of 16 bytes: kept in it when it fits (a slice, a number, a small union, `void`), else
+  in the arena and its address kept. No allocation for the values a loop passes.
+- The machine RETURNS a value in a register: no node made for it.
+- A RUN CONSUMES ITS PROGRAM: each node is freed — to a free list — as soon as the machine has read it; each frame
+  when it is popped. A node `shared` (`b.share(p)`) is kept, and so is everything in it while the machine is inside
+  it: a program run again, or used in two places. A continuation's call returns a FRESH program (the rule a closure
+  keeps: a program it holds and returns is a program used twice — share it).
+- `k` captured PINS its frames: the segment up to the handler is a template; each resumption copies it, the copies
+  marked shared, so what they hold is never freed and `k` is resumed again. A `k` never resumed keeps its template until
+  the arena goes; so do `Handling`s, `Captured`s and the values bigger than 16 bytes — what a handler's installation
+  makes, not what a loop turns.
+- Debug builds never reuse a node: a freed one is poisoned (`dead`), and running it again is a panic that says to
+  share it. Tests run in Debug and ReleaseSafe (`zig build test -Doptimize=ReleaseSafe`: the free lists at work).
+
+Measured (ReleaseFast, `zig build bench`): a tick (`get`, `put`, three binds), a million of them: 17–18 ns a tick
+(77 before); taken from memory in all, 4 nodes and 3 frames — 336 bytes, for a million ticks or for ten.
 
 ## Next
 
-1. MEMORY: frames no `k` captured popped back to a free list; small values (≤ a word) kept in the node, not boxed;
-   a long loop's nodes in a region freed as the loop goes.
-2. THE CONTEXTS LAYER: an effect as an interface passed in — as Zig's own `Allocator` and `Io` are (since 0.16 `main`
+1. THE CONTEXTS LAYER: an effect as an interface passed in — as Zig's own `Allocator` and `Io` are (since 0.16 `main`
    is given `Io`); a handler a struct implementing it; a call a call, inlined. For the effects answered in place; the
    machine for the rest (abort, choice, resuming twice, durable steps, interceptors as data).
-3. okay's WIRE, so a Zig program runs under another language's handlers (the JVM's by its C ABI, as okay-lean and
+2. okay's WIRE, so a Zig program runs under another language's handlers (the JVM's by its C ABI, as okay-lean and
    okay-rust do); the family's TCK of scenarios.
