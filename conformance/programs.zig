@@ -101,6 +101,115 @@ fn quote(cx: wire.Direct, a: std.mem.Allocator, args: []const Value) !Value {
     return try wire.call(cx, "discount", try a.dupe(Value, &.{.{ .float = amount }}));
 }
 
+// ---- on a multiplexed wire: requests in flight together, streams both ways
+
+/// gates by name: `await_open(name)` answers once `open(name)` has been called — on one worker, the second request
+/// taken while the first still waits
+var gates: std.StringHashMapUnmanaged(*std.Io.Event) = .empty;
+var gates_mu: std.Io.Mutex = .init;
+const global = std.heap.smp_allocator;
+
+fn gate(io: std.Io, name: []const u8) *std.Io.Event {
+    gates_mu.lockUncancelable(io);
+    defer gates_mu.unlock(io);
+    if (gates.get(name)) |g| return g;
+    const g = global.create(std.Io.Event) catch unreachable;
+    g.* = .unset;
+    gates.put(global, global.dupe(u8, name) catch unreachable, g) catch unreachable;
+    return g;
+}
+
+fn awaitOpen(cx: wire.Direct, _: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 1 or args[0] != .string) return error.ValueError;
+    try gate(wire.ioOf(cx), args[0].string).wait(wire.ioOf(cx));
+    return args[0];
+}
+
+fn open(cx: wire.Direct, _: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 1 or args[0] != .string) return error.ValueError;
+    gate(wire.ioOf(cx), args[0].string).set(wire.ioOf(cx));
+    return args[0];
+}
+
+/// how many chunks each tagged stream has sent, and whether its function has returned: counted on the far side
+var counts: std.StringHashMapUnmanaged(*Count) = .empty;
+var counts_mu: std.Io.Mutex = .init;
+const Count = struct { emitted: std.atomic.Value(i64) = .init(0), stopped: std.atomic.Value(bool) = .init(false) };
+
+fn countOf(io: std.Io, tag: []const u8) *Count {
+    counts_mu.lockUncancelable(io);
+    defer counts_mu.unlock(io);
+    if (counts.get(tag)) |c| return c;
+    const c = global.create(Count) catch unreachable;
+    c.* = .{};
+    counts.put(global, global.dupe(u8, tag) catch unreachable, c) catch unreachable;
+    return c;
+}
+
+/// a STREAM the worker drives: `0 until n` in chunks of `size`, each chunk counted as it goes out
+fn numbers(cx: wire.Direct, a: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 3 or args[2] != .string) return error.ValueError;
+    const n = wire.int(args[0]) orelse return error.ValueError;
+    const size = wire.int(args[1]) orelse return error.ValueError;
+    const count = countOf(wire.ioOf(cx), args[2].string);
+    defer count.stopped.store(true, .release);
+    var i: i64 = 0;
+    while (i < n) : (i += size) {
+        const len: usize = @intCast(@min(size, n - i));
+        const chunk = try a.alloc(Value, len);
+        for (chunk, 0..) |*x, j| x.* = .{ .integer = i + @as(i64, @intCast(j)) };
+        wire.emit(cx, wire.array(a, chunk)) catch return .null; // cancelled: stop producing
+        _ = count.emitted.fetchAdd(1, .release);
+    }
+    return .null;
+}
+
+fn emittedOf(cx: wire.Direct, _: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 1 or args[0] != .string) return error.ValueError;
+    return .{ .integer = countOf(wire.ioOf(cx), args[0].string).emitted.load(.acquire) };
+}
+
+fn stoppedOf(cx: wire.Direct, _: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 1 or args[0] != .string) return error.ValueError;
+    return .{ .bool = countOf(wire.ioOf(cx), args[0].string).stopped.load(.acquire) };
+}
+
+/// the HOST's stream into a call, summed once its gate opens: the host feeds no further ahead than its credit
+fn sumAfter(cx: wire.Direct, a: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 1 or args[0] != .string) return error.ValueError;
+    try gate(wire.ioOf(cx), args[0].string).wait(wire.ioOf(cx));
+    var sum: i64 = 0;
+    while (wire.next(cx)) |chunk| {
+        if (chunk != .array) return error.ValueError;
+        for (chunk.array.items) |x| sum += wire.int(x) orelse 0;
+    }
+    try wire.emit(cx, wire.array(a, try a.dupe(Value, &.{.{ .integer = sum }})));
+    return .null;
+}
+
+/// a DUPLEX transform: each chunk in answered by what it had not seen before
+fn dedup(cx: wire.Direct, a: std.mem.Allocator, _: []const Value) !Value {
+    var seen: std.AutoHashMapUnmanaged(i64, void) = .empty;
+    while (wire.next(cx)) |chunk| {
+        if (chunk != .array) return error.ValueError;
+        var fresh: std.ArrayList(Value) = .empty;
+        for (chunk.array.items) |x| {
+            const n = wire.int(x) orelse continue;
+            if ((try seen.getOrPut(a, n)).found_existing) continue;
+            try fresh.append(a, .{ .integer = n });
+        }
+        if (fresh.items.len > 0) wire.emit(cx, wire.array(a, fresh.items)) catch return .null;
+    }
+    return .null;
+}
+
 pub const direct = [_]wire.DirectEntry{
     .{ .name = "quote", .function = quote },
+    .{ .name = "await_open", .function = awaitOpen },
+    .{ .name = "open", .function = open },
+    .{ .name = "numbers", .function = numbers },
+    .{ .name = "emitted_of", .function = emittedOf },
+    .{ .name = "stopped_of", .function = stoppedOf },
+    .{ .name = "sum_after", .function = sumAfter },
+    .{ .name = "dedup", .function = dedup },
 };

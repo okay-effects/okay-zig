@@ -77,9 +77,11 @@ host's own process through its C ABI (`zig-out/lib/libokay-zig-worker`). A progr
 any number of times. In DIRECT STYLE a plain function given a context calls the host and waits for the answer (`try
 wire.call(cx, "price_of", args)`) — a task of the worker's `Io`, a thread or a fiber as that `Io` decides. The program
 as data stays the main path: its `k` is resumed any number of times. `wire.guard(b, E, p, g)` puts a guard before them:
-a refused operation never reaches the host, and the program fails with a condition named by the guard's error. okay's
-`WireConformance` passes (multi-shot across the link, typed callbacks under the host's `Reader`, tables, held values,
-failures by name): `conformance/TestZigLinks.scala`.
+a refused operation never reaches the host, and the program fails with a condition named by the guard's error. On pipes
+the worker is multiplexed: requests in flight together, and streams both ways under credit (`wire.emit`, `wire.next`).
+okay's `WireConformance` passes in full over pipes (multi-shot across the link, typed callbacks under the host's
+`Reader`, tables, held values, failures by name, direct style, mux, streams, a duplex dedup):
+`conformance/TestZigLinks.scala`.
 
 ## The family's TCK
 

@@ -2,9 +2,9 @@
 
 Status 2026-10-28: both layers built. The machine — rows, typed places, `handle` and `handleTail`, State, Reader,
 Writer, Fail, Choose; memory a loop's turn, not its length; steps (`next`, `chain`, `seq`). Contexts — `context`, `op`,
-`needs`, `observe`, `guard`. okay's wire: a worker on pipes and on okay's C ABI, okay's `WireConformance` passed;
-a guard on the wire; direct style on the wire (14 of okay's conformance passed). okay-kernel's TCK digest: the
-family's. 25 tests, in Debug and ReleaseSafe.
+`needs`, `observe`, `guard`. okay's wire: a worker on pipes and on okay's C ABI, okay's `WireConformance` passed; a
+guard on the wire; direct style, mux and streams on the wire (okay's conformance: all over pipes). okay-kernel's TCK
+digest: the family's. 25 tests, in Debug and ReleaseSafe.
 
 ## Why it fits Zig
 
@@ -145,9 +145,27 @@ runs nothing concurrently refuses direct calls (`RuntimeError`). Fibers are not 
 as in any context. `Worker.withDirect(io, entries)`; the stdio worker uses `init.io`, the library its own `Io.Threaded`.
 okay's `WireConformance` DIRECT STYLE passes over pipes and FFM: 14 passed, only streams and mux skipped.
 
+## Mux and streams on the wire (2026-10-28)
+
+On pipes, a worker with an `Io` is MULTIPLEXED: its hello says `"mux": true`; each request is a task of an
+`Io.Group`, answered when it finishes (a call waiting for another is answered once the other arrives); what requests
+share is under one `Io.Mutex`, let go while a direct function runs; replies and a stream's messages are written one at a
+time.
+
+- A call with `"stream": s` is a STREAM the far side drives: answered at once, its function a task feeding it by
+  `wire.emit(cx, chunk)` — waiting while the host has granted no credit, `error.Canceled` once the host cancelled —
+  each chunk `{"stream": s, "chunk": …}`; its return `{"stream": s, "end": true}`, its failure the stream's condition.
+  The host's `credit` grants more.
+- With `"input": {"id": -s}` the HOST feeds the call: its `chunk`s and `end` queued, `wire.next(cx)` the next one
+  (null at the end), each taken granting the host one more (`{"stream": -s, "credit": 1}`). Both at once: a full-duplex
+  transform. `cancel` ends both.
+- At the input's end the worker stops every stream (cancelled, inputs ended) and cancels the group.
+- okay's `WireConformance` over pipes: every test passed — mux, a stream under a credit of two, the far side counted
+  never more than its credit ahead, an early stop cancelling it, the host feeding no further than its credit, a dedup
+  of 20 000 rows both ways. In process (FFM) the link is not duplex: those six skipped, as for Go's WebAssembly worker.
+
 ## Next
 
 1. A host's policy over a Zig program: okay-guard's `Action` for each `perform` the worker sends (service = the
    worker, operation = the name, arguments) — on the host's side, okay-guard's; nothing here to change.
-2. Streams and mux (a worker serving requests in flight together): Zig's `Io` makes the threads; the wire's mux
-   frames are the work.
+2. Fibers: the same suite on `Io.Evented` once Zig's evented `Io` compiles on macOS (or on Linux, `Io.Uring`).

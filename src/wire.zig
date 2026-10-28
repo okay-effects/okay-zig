@@ -375,7 +375,7 @@ const Stepping = struct {
 // ------------------------------------------------------------------------------------------------ direct style
 
 /// THE HOST AS A CONTEXT'S HANDLER: for DIRECT STYLE — a plain function given a context, its `cx.op(Host, .request,
-/// …)` a call that waits for the host's answer (the function on a thread of its own, parked while the host works)
+/// …)` a call that waits for the host's answer (the function a task of the worker's `Io`, waiting while the host works)
 pub const Caller = struct {
     pub const Effect = Host;
     park: *Parked,
@@ -408,6 +408,71 @@ pub fn call(cx: anytype, name: []const u8, args: []const Value) error{ Condition
     };
 }
 
+/// the `Io` a direct function runs on: what it waits by (a gate, a sleep)
+pub fn ioOf(cx: anytype) std.Io {
+    return cx.of(Host).park.io;
+}
+
+/// ONE CHUNK of the stream this call feeds (a call opened as a stream): sent when the host has granted credit, waiting
+/// while it has not — the function runs ahead of its consumer by at most the credit. `error.Canceled` when the host
+/// cancelled the stream: stop producing
+pub fn emit(cx: anytype, chunk: Value) error{ NotStreaming, Canceled }!void {
+    const p = cx.of(Host).park;
+    const o = if (p.outflow) |*o| o else return error.NotStreaming;
+    o.mu.lockUncancelable(p.io);
+    while (o.credit == 0 and !o.cancelled) o.more.waitUncancelable(p.io, &o.mu);
+    const cancelled = o.cancelled;
+    if (!cancelled) o.credit -= 1;
+    o.mu.unlock(p.io);
+    if (cancelled) return error.Canceled;
+    var scratch = std.heap.ArenaAllocator.init(p.w.gpa);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    p.w.push(object(a, .{ .{ "stream", Value{ .integer = o.id } }, .{ "chunk", outgoing(a, chunk) catch oom() } }));
+}
+
+/// THE NEXT CHUNK of the host's stream into this call, waiting until one comes; null at its end. Taking one grants
+/// the host one more chunk of credit: the host runs ahead of the function by at most the credit it was given
+pub fn next(cx: anytype) ?Value {
+    const p = cx.of(Host).park;
+    const i = if (p.inflow) |*i| i else return null;
+    i.mu.lockUncancelable(p.io);
+    while (i.queue.items.len == 0 and !i.ended) i.more.waitUncancelable(p.io, &i.mu);
+    if (i.queue.items.len == 0) {
+        i.mu.unlock(p.io);
+        return null;
+    }
+    const c = i.queue.orderedRemove(0);
+    i.mu.unlock(p.io);
+    const v = clone(p.arena.allocator(), c.value) catch oom();
+    c.arena.deinit();
+    p.w.gpa.destroy(c.arena);
+    var scratch = std.heap.ArenaAllocator.init(p.w.gpa);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+    p.w.push(object(sa, .{ .{ "stream", Value{ .integer = i.id } }, .{ "credit", Value{ .integer = 1 } } }));
+    return v;
+}
+
+/// a stream a call feeds: the credit the host granted and not yet used, whether it cancelled
+const Outflow = struct {
+    id: i64,
+    mu: std.Io.Mutex = .init,
+    more: std.Io.Condition = .init,
+    credit: i64,
+    cancelled: bool = false,
+};
+
+/// the host's stream into a call: its chunks as they come (each in its own arena), whether it ended
+const Inflow = struct {
+    id: i64,
+    mu: std.Io.Mutex = .init,
+    more: std.Io.Condition = .init,
+    queue: std.ArrayList(Chunk) = .empty,
+    ended: bool = false,
+    const Chunk = struct { arena: *std.heap.ArenaAllocator, value: Value };
+};
+
 /// A DIRECT CALL IN FLIGHT: the function runs as a task of the worker's `Io` (`io.concurrent`) — a fiber with
 /// `Io.Evented`, a thread with `Io.Threaded`: the `Io` the worker is given chooses — and takes turns with the worker,
 /// one running while the other waits on its event. The host forgetting it is `Io`'s cancellation: the function's
@@ -427,6 +492,12 @@ pub const Parked = struct {
     canceled: bool = false,
     k: u64 = 0,
     finished: bool = false,
+    /// the worker: its allocator, and where a stream's messages go
+    w: *Worker,
+    /// a call opened as a STREAM: the stream it feeds, and the host's stream into it — its chunks pushed, its end
+    /// pushed, no turns taken
+    outflow: ?Outflow = null,
+    inflow: ?Inflow = null,
 
     const gone: Host.Reply = .{ .failed = .{ .kind = "Canceled", .message = "the host forgot this run" } };
 
@@ -446,6 +517,7 @@ pub const Parked = struct {
         const cx: Direct = .{ .handlers = .{Caller{ .park = p }}, .observers = .{}, .guards = .{} };
         p.out = if (f(cx, p.arena.allocator(), args)) |v| .{ .done = v } else |e| .{ .failed = if (e ==
             error.Condition and p.failure != null) p.failure.? else .{ .kind = @errorName(e), .message = "" } };
+        if (p.outflow) |o| p.w.ended(p, o.id);
         p.finished = true;
         p.back.set(p.io);
     }
@@ -454,14 +526,21 @@ pub const Parked = struct {
     fn turn(p: *Parked) Step {
         p.back.waitUncancelable(p.io);
         p.back.reset();
-        if (p.finished) p.task.await(p.io);
         return p.out;
     }
 
     /// the function started, as a task of `io`: null if `io` runs nothing concurrently
-    fn start(gpa: Allocator, io: std.Io, f: DirectFn, args: []const Value) ?*Parked {
+    const Head = struct { id: i64, credit: i64, input: ?i64 };
+
+    fn start(w: *Worker, f: DirectFn, args: []const Value, stream: ?Head) ?*Parked {
+        const gpa = w.gpa;
+        const io = w.io.?;
         const p = gpa.create(Parked) catch oom();
-        p.* = .{ .io = io, .arena = .init(gpa) };
+        p.* = .{ .io = io, .arena = .init(gpa), .w = w };
+        if (stream) |h| {
+            p.outflow = .{ .id = h.id, .credit = h.credit };
+            if (h.input) |i| p.inflow = .{ .id = i };
+        }
         const own = p.arena.allocator().alloc(Value, args.len) catch oom();
         for (args, own) |x, *y| y.* = clone(p.arena.allocator(), x) catch oom();
         p.task = io.concurrent(body, .{ p, f, own }) catch {
@@ -480,7 +559,14 @@ pub const Parked = struct {
 
     /// the run dropped: a function still waiting cancelled (`Io`'s cancellation), and awaited
     fn drop(p: *Parked, gpa: Allocator) void {
-        if (!p.finished) p.task.cancel(p.io);
+        if (!p.finished) p.task.cancel(p.io) else p.task.await(p.io);
+        if (p.inflow) |*i| {
+            for (i.queue.items) |c| {
+                c.arena.deinit();
+                gpa.destroy(c.arena);
+            }
+            i.queue.deinit(gpa);
+        }
         p.arena.deinit();
         gpa.destroy(p);
     }
@@ -521,13 +607,22 @@ const Held = struct { arena: std.heap.ArenaAllocator, value: Value };
 pub const Worker = struct {
     gpa: Allocator,
     programs: []const Entry,
-    /// functions in direct style, each call on a thread of its own: `withDirect`
+    /// functions in direct style, each call a task of `io`: `withDirect`
     direct: []const DirectEntry = &.{},
     io: ?std.Io = null,
     runs: std.AutoHashMapUnmanaged(u64, *Run) = .empty,
     parked: std.AutoHashMapUnmanaged(u64, *Parked) = .empty,
     held: std.AutoHashMapUnmanaged(u64, *Held) = .empty,
     next_ref: u64 = 0,
+    /// MUX (`serve` with an `Io`): requests in flight together, each a task; what they share under `mu`, the replies
+    /// and a stream's messages written one at a time under `writing`
+    out: ?*std.Io.Writer = null,
+    mu: std.Io.Mutex = .init,
+    writing: std.Io.Mutex = .init,
+    /// the calls feeding streams, by the stream's id and by their input's; every one opened, until it is awaited
+    outflows: std.AutoHashMapUnmanaged(i64, *Parked) = .empty,
+    inflows: std.AutoHashMapUnmanaged(i64, *Parked) = .empty,
+    streamed: std.ArrayList(*Parked) = .empty,
 
     pub fn init(gpa: Allocator, programs: []const Entry) Worker {
         return .{ .gpa = gpa, .programs = programs };
@@ -542,6 +637,11 @@ pub const Worker = struct {
     }
 
     pub fn deinit(w: *Worker) void {
+        w.stopStreams();
+        for (w.streamed.items) |p| p.drop(w.gpa);
+        w.streamed.deinit(w.gpa);
+        w.outflows.deinit(w.gpa);
+        w.inflows.deinit(w.gpa);
         var parked = w.parked.valueIterator();
         while (parked.next()) |p| p.*.drop(w.gpa);
         w.parked.deinit(w.gpa);
@@ -554,6 +654,104 @@ pub const Worker = struct {
             w.gpa.destroy(h.*);
         }
         w.held.deinit(w.gpa);
+    }
+
+    /// the worker's first line on a multiplexed wire: requests answered as they finish, streams both ways
+    pub const hello_mux = "{\"shim\":9,\"python\":\"zig\",\"speaks\":{\"format\":[\"json\"],\"compress\":[]," ++
+        "\"frames\":[\"columnar\"],\"mux\":true}}";
+
+    fn muxed(w: *const Worker) bool {
+        return w.out != null;
+    }
+    fn lock(w: *Worker) void {
+        if (w.muxed()) w.mu.lockUncancelable(w.io.?);
+    }
+    fn unlock(w: *Worker) void {
+        if (w.muxed()) w.mu.unlock(w.io.?);
+    }
+
+    /// a direct function's turn, the worker's lock let go meanwhile: other requests answered while it runs
+    fn turnOf(w: *Worker, p: *Parked, reply: ?Host.Reply) Step {
+        w.unlock();
+        defer w.lock();
+        return if (reply) |r| p.give(r) else p.turn();
+    }
+
+    /// one line out: a reply, or a stream's message nobody asked for
+    fn write(w: *Worker, line: []const u8) void {
+        const out = w.out orelse return;
+        w.writing.lockUncancelable(w.io.?);
+        defer w.writing.unlock(w.io.?);
+        out.writeAll(line) catch {};
+        out.writeAll("\n") catch {};
+        out.flush() catch {};
+    }
+
+    /// a message to the host that answers no request: a stream's chunk, its end, a credit
+    fn push(w: *Worker, msg: Value) void {
+        const line = std.json.Stringify.valueAlloc(w.gpa, msg, .{}) catch oom();
+        defer w.gpa.free(line);
+        w.write(line);
+    }
+
+    /// a stream's function has returned: its end (or its condition) sent, the stream closed
+    fn ended(w: *Worker, p: *Parked, id: i64) void {
+        var scratch = std.heap.ArenaAllocator.init(w.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        w.lock();
+        _ = w.outflows.remove(id);
+        if (p.inflow) |i| _ = w.inflows.remove(i.id);
+        w.unlock();
+        w.push(switch (p.out) {
+            .failed => |c| object(a, .{ .{ "stream", Value{ .integer = id } }, .{ "condition", object(a, .{
+                .{ "kind", Value{ .string = c.kind } },
+                .{ "message", Value{ .string = c.message } },
+            }) } }),
+            else => object(a, .{ .{ "stream", Value{ .integer = id } }, .{ "end", Value{ .bool = true } } }),
+        });
+    }
+
+    /// every stream stopped: what feeds one cancelled, what reads one at its end — the wire is closing
+    fn stopStreams(w: *Worker) void {
+        for (w.streamed.items) |p| {
+            if (p.outflow) |*o| {
+                o.mu.lockUncancelable(p.io);
+                o.cancelled = true;
+                o.more.broadcast(p.io);
+                o.mu.unlock(p.io);
+            }
+            if (p.inflow) |*i| {
+                i.mu.lockUncancelable(p.io);
+                i.ended = true;
+                i.more.broadcast(p.io);
+                i.mu.unlock(p.io);
+            }
+        }
+    }
+
+    /// a call opened as a stream: started, its stream registered; answered at once
+    fn openStream(w: *Worker, f: DirectFn, args: []const Value, req: Value) Answer {
+        if (!w.muxed()) return refuse("NotStreaming", "this Zig worker is not on a multiplexed wire: no stream");
+        const sid = int(field(req, "stream") orelse .null) orelse return refuse("ValueError", "a stream names its id");
+        const input: ?i64 = if (field(req, "input")) |i| int(field(i, "id") orelse .null) else null;
+        // the streams that ended before: awaited, freed
+        var i: usize = 0;
+        while (i < w.streamed.items.len) {
+            const p = w.streamed.items[i];
+            if (p.finished) {
+                _ = w.streamed.swapRemove(i);
+                p.drop(w.gpa);
+            } else i += 1;
+        }
+        const credit = int(field(req, "credit") orelse .null) orelse 0;
+        const head: Parked.Head = .{ .id = sid, .credit = credit, .input = input };
+        // registered before it starts: a credit or a chunk that comes at once finds it
+        const p = Parked.start(w, f, args, head) orelse return noConcurrency();
+        w.streamed.append(w.gpa, p) catch oom();
+        w.outflows.put(w.gpa, sid, p) catch oom();
+        if (input) |in| w.inflows.put(w.gpa, in, p) catch oom();
+        return .{ .ok = .null };
     }
 
     /// the worker's first line: who it is, what it speaks
@@ -639,6 +837,8 @@ pub const Worker = struct {
     }
 
     fn answer(w: *Worker, a: Allocator, req: Value) Answer {
+        w.lock();
+        defer w.unlock();
         const op = text(field(req, "op")) orelse return refuse("ValueError", "not a request");
         const run = natural(field(req, "run"));
         if (std.mem.eql(u8, op, "program")) {
@@ -650,9 +850,9 @@ pub const Worker = struct {
                 var scratch = std.heap.ArenaAllocator.init(w.gpa);
                 defer scratch.deinit();
                 const args = w.argsOf(scratch.allocator(), req, &why) orelse return .{ .condition = why };
-                const parked = Parked.start(w.gpa, w.io.?, f, args) orelse return noConcurrency();
+                const parked = Parked.start(w, f, args, null) orelse return noConcurrency();
                 w.parked.put(w.gpa, run.?, parked) catch oom();
-                return w.directNode(a, run.?, parked, parked.turn());
+                return w.directNode(a, run.?, parked, w.turnOf(parked, null));
             }
             const p = w.find(fn_.?) orelse return refuse("LookupError", "no program by that name in this worker");
             const r = Run.make(w.gpa);
@@ -667,7 +867,7 @@ pub const Worker = struct {
             if (run == null or k == null) return refuse("ValueError", "a continue names its run and its k");
             if (w.parked.get(run.?)) |parked| {
                 if (k.? != parked.k) return refuse("LookupError", "a direct call's continuation is continued once");
-                return w.directNode(a, run.?, parked, parked.give(replyOf(parked.arena.allocator(), req)));
+                return w.directNode(a, run.?, parked, w.turnOf(parked, replyOf(parked.arena.allocator(), req)));
             }
             const r = w.runs.get(run.?) orelse return refuse("LookupError", "no such run here (forgotten?)");
             const rest = r.rests.get(k.?) orelse
@@ -688,9 +888,10 @@ pub const Worker = struct {
                 var scratch = std.heap.ArenaAllocator.init(w.gpa);
                 defer scratch.deinit();
                 const args = w.argsOf(scratch.allocator(), req, &why) orelse return .{ .condition = why };
-                const parked = Parked.start(w.gpa, w.io.?, f, args) orelse return noConcurrency();
+                if (field(req, "stream") != null) return w.openStream(f, args, req);
+                const parked = Parked.start(w, f, args, null) orelse return noConcurrency();
                 defer parked.drop(w.gpa);
-                return switch (parked.turn()) {
+                return switch (w.turnOf(parked, null)) {
                     .done => |v| .{ .ok = outgoing(a, v) catch oom() },
                     .perform => refuse("ValueError", "it calls the host: a call answers a value; run it as a program"),
                     .failed => |c| .{ .condition = .{
@@ -716,6 +917,53 @@ pub const Worker = struct {
                     .message = a.dupe(u8, c.message) catch oom(),
                 } },
             };
+        }
+        if (std.mem.eql(u8, op, "credit")) {
+            const sid = int(field(req, "stream") orelse .null) orelse 0;
+            if (w.outflows.get(sid)) |p| {
+                const o = &p.outflow.?;
+                o.mu.lockUncancelable(p.io);
+                o.credit += int(field(req, "credit") orelse .null) orelse 0;
+                o.more.broadcast(p.io);
+                o.mu.unlock(p.io);
+            }
+            return .{ .ok = .null };
+        }
+        if (std.mem.eql(u8, op, "chunk") or std.mem.eql(u8, op, "end")) {
+            const sid = int(field(req, "stream") orelse .null) orelse 0;
+            if (w.inflows.get(sid)) |p| {
+                const i = &p.inflow.?;
+                var chunk: ?Inflow.Chunk = null;
+                if (std.mem.eql(u8, op, "chunk")) {
+                    const arena = w.gpa.create(std.heap.ArenaAllocator) catch oom();
+                    arena.* = .init(w.gpa);
+                    const v = incoming(arena.allocator(), field(req, "chunk") orelse .null) catch oom();
+                    chunk = .{ .arena = arena, .value = v };
+                }
+                i.mu.lockUncancelable(p.io);
+                if (chunk) |c| i.queue.append(w.gpa, c) catch oom() else i.ended = true;
+                i.more.broadcast(p.io);
+                i.mu.unlock(p.io);
+            }
+            return .{ .ok = .null };
+        }
+        if (std.mem.eql(u8, op, "cancel")) {
+            const sid = int(field(req, "stream") orelse .null) orelse 0;
+            if (w.inflows.get(-sid)) |p| {
+                const i = &p.inflow.?;
+                i.mu.lockUncancelable(p.io);
+                i.ended = true;
+                i.more.broadcast(p.io);
+                i.mu.unlock(p.io);
+            }
+            if (w.outflows.get(sid)) |p| {
+                const o = &p.outflow.?;
+                o.mu.lockUncancelable(p.io);
+                o.cancelled = true;
+                o.more.broadcast(p.io);
+                o.mu.unlock(p.io);
+            }
+            return .{ .ok = .null };
         }
         if (std.mem.eql(u8, op, "configure")) {
             const format = text(field(req, "format"));
@@ -796,6 +1044,7 @@ pub const Worker = struct {
 
     /// the worker on a reader and a writer: its hello first, then one line in, one line out, until the input ends
     pub fn serve(w: *Worker, in: *std.Io.Reader, out: *std.Io.Writer) !void {
+        if (w.io) |io| return w.serveMux(io, in, out);
         try out.writeAll(hello ++ "\n");
         try out.flush();
         while (try in.takeDelimiter('\n')) |raw| {
@@ -807,5 +1056,31 @@ pub const Worker = struct {
             try out.writeAll("\n");
             try out.flush();
         }
+    }
+
+    /// MULTIPLEXED: each request a task of `io`, answered when it finishes — a call that waits for another is
+    /// answered once the other arrives; a stream's chunks go out as its function emits them
+    fn serveMux(w: *Worker, io: std.Io, in: *std.Io.Reader, out: *std.Io.Writer) !void {
+        w.out = out;
+        w.write(hello_mux);
+        var group: std.Io.Group = .init;
+        while (try in.takeDelimiter('\n')) |raw| {
+            const line = std.mem.trimEnd(u8, raw, "\r");
+            if (line.len == 0) continue;
+            const own = w.gpa.dupe(u8, line) catch oom();
+            group.concurrent(io, answerLine, .{ w, own }) catch answerLine(w, own);
+        }
+        w.lock();
+        w.stopStreams();
+        w.unlock();
+        group.cancel(io);
+        w.out = null;
+    }
+
+    fn answerLine(w: *Worker, line: []u8) void {
+        defer w.gpa.free(line);
+        const reply = w.serve1(line);
+        defer w.gpa.free(reply);
+        w.write(reply);
     }
 };

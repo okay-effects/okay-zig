@@ -5,7 +5,7 @@ const ok = @import("okay");
 const programs = @import("programs.zig");
 
 pub fn main(init: std.process.Init) !void {
-    var w = ok.wire.Worker.init(init.gpa, &programs.programs).withDirect(init.io, &programs.direct);
+    var w = ok.wire.Worker.init(std.heap.smp_allocator, &programs.programs).withDirect(init.io, &programs.direct);
     defer w.deinit();
     var in_buf: [1 << 20]u8 = undefined;
     var out_buf: [1 << 16]u8 = undefined;
