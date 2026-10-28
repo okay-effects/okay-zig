@@ -8,17 +8,19 @@
 
 const std = @import("std");
 const ok = @import("okay");
-const programs = @import("programs.zig").programs;
+const programs = @import("programs.zig");
 
 const gpa = std.heap.c_allocator;
 var worker: ?ok.wire.Worker = null;
+var threaded: std.Io.Threaded = undefined;
 var lock: std.atomic.Mutex = .unlocked;
 
 export fn okay_exchange(req: [*]const u8, len: usize, out_len: *usize) [*]u8 {
     while (!lock.tryLock()) std.atomic.spinLoopHint();
     defer lock.unlock();
     const w = if (worker) |*w| w else blk: {
-        worker = ok.wire.Worker.init(gpa, &programs);
+        threaded = .init(gpa, .{});
+        worker = ok.wire.Worker.init(gpa, &programs.programs).withDirect(threaded.io(), &programs.direct);
         break :blk &worker.?;
     };
     const out = if (len == 0)

@@ -92,3 +92,15 @@ pub const programs = [_]wire.Entry{
     .{ .name = "counter", .program = counter },
     .{ .name = "describe", .program = describe },
 };
+
+/// DIRECT STYLE: `quote(sku, qty)`, as `total` — ordinary code, each call to the host waiting for its answer
+fn quote(cx: wire.Direct, a: std.mem.Allocator, args: []const Value) !Value {
+    if (args.len != 2 or args[0] != .string) return error.ValueError;
+    const price = wire.float(try wire.call(cx, "price_of", args[0..1])) orelse return error.TypeError;
+    const amount = price * (wire.float(args[1]) orelse return error.ValueError);
+    return try wire.call(cx, "discount", try a.dupe(Value, &.{.{ .float = amount }}));
+}
+
+pub const direct = [_]wire.DirectEntry{
+    .{ .name = "quote", .function = quote },
+};

@@ -16,8 +16,8 @@ import okay.foreign.{ForeignWorker, WireConformance}
  *
  * The conformance tests are tagged `Live`, which okay's build excludes by default: hence the `set`.
  *
- * The worker's directory is OKAY_ZIG, by default ~/work/my/okay-zig. Programs as data only: no direct style, no
- * streams (they are a muxed worker's), so those tests are skipped as for Lean and Haskell.
+ * The worker's directory is OKAY_ZIG, by default ~/work/my/okay-zig. Programs as data and direct style (each call a
+ * thread of its own, parked while the host works); no streams (a muxed worker's): those tests are skipped.
  */
 object ZigWorker:
   val dir: Path = Paths.get(sys.env.getOrElse("OKAY_ZIG", sys.props("user.home") + "/work/my/okay-zig"))
@@ -27,7 +27,6 @@ object ZigWorker:
 /** (Zig, pipes), JSON */
 class TestZigPipes extends WireConformance:
   override def munitIgnore: Boolean = !Files.isExecutable(ZigWorker.binary)
-  override def direct: Boolean = false
   lazy val engine: ForeignWorker = ForeignWorker.speaking(Seq(ZigWorker.binary.toString))
   override def afterAll(): Unit = if !munitIgnore then engine.close()
 
@@ -39,7 +38,6 @@ class TestZigPipes extends WireConformance:
 /** (Zig, FFM): the same worker in this process, a library of okay's C ABI */
 class TestZigFfm extends WireConformance:
   override def munitIgnore: Boolean = !Files.exists(ZigWorker.library)
-  override def direct: Boolean = false
   lazy val engine: ForeignWorker = ForeignWorker.inProcess(ZigWorker.library)
   override def afterAll(): Unit = if !munitIgnore then engine.close()
 

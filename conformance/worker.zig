@@ -2,10 +2,10 @@
 
 const std = @import("std");
 const ok = @import("okay");
-const programs = @import("programs.zig").programs;
+const programs = @import("programs.zig");
 
 pub fn main(init: std.process.Init) !void {
-    var w = ok.wire.Worker.init(init.gpa, &programs);
+    var w = ok.wire.Worker.init(init.gpa, &programs.programs).withDirect(init.io, &programs.direct);
     defer w.deinit();
     var in_buf: [1 << 20]u8 = undefined;
     var out_buf: [1 << 16]u8 = undefined;

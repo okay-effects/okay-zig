@@ -3,7 +3,8 @@
 Status 2026-10-28: both layers built. The machine — rows, typed places, `handle` and `handleTail`, State, Reader,
 Writer, Fail, Choose; memory a loop's turn, not its length; steps (`next`, `chain`, `seq`). Contexts — `context`, `op`,
 `needs`, `observe`, `guard`. okay's wire: a worker on pipes and on okay's C ABI, okay's `WireConformance` passed;
-a guard on the wire. okay-kernel's TCK digest: the family's. 24 tests, in Debug and ReleaseSafe.
+a guard on the wire; direct style on the wire (14 of okay's conformance passed). okay-kernel's TCK digest: the
+family's. 25 tests, in Debug and ReleaseSafe.
 
 ## Why it fits Zig
 
@@ -128,8 +129,22 @@ reference machine's, okay-java's and okay-rust's. Passed, in Debug and ReleaseSa
 with a condition named by the guard's error (`{"kind": "OverBudget"}`), the operation never sent. `E` may be `Host`
 itself: the far side's own policy over what it asks of the host.
 
+## Direct style on the wire (2026-10-28)
+
+The contexts layer, served: a DIRECT function is `fn (cx: wire.Direct, a: Allocator, args) !Value` — a plain
+function, its host a context's handler (`Caller`), `wire.call(cx, "price_of", args)` a call that WAITS for the host's
+answer. Each run is a thread of its own (`Parked`), taking turns with the worker by two `Io.Event`s: the function runs
+until it calls the host, then the worker sends `perform` with `"once": true`, and `continue` gives the answer back —
+once (a stack cannot be copied: a second `continue` of a `k` is a `LookupError`). A host's condition is
+`error.Condition` in the function (the condition kept, sent back if it escapes); any other error a condition by its
+name. `forget` of a waiting run answers its call `Forgotten`, so it unwinds and its thread ends. `cx.guard` and
+`cx.observe` work in it as in any context. `Worker.withDirect(io, entries)`; the stdio worker uses `init.io`, the
+library its own `Io.Threaded`. okay's `WireConformance` DIRECT STYLE passes over pipes and FFM: 14 passed, only
+streams and mux skipped.
+
 ## Next
 
 1. A host's policy over a Zig program: okay-guard's `Action` for each `perform` the worker sends (service = the
    worker, operation = the name, arguments) — on the host's side, okay-guard's; nothing here to change.
-2. Direct style on the wire (`once`): a Zig function calling the host as a plain call, on a thread or a fiber.
+2. Streams and mux (a worker serving requests in flight together): Zig's `Io` makes the threads; the wire's mux
+   frames are the work.

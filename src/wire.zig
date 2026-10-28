@@ -372,6 +372,116 @@ const Stepping = struct {
     }
 };
 
+// ------------------------------------------------------------------------------------------------ direct style
+
+/// THE HOST AS A CONTEXT'S HANDLER: for DIRECT STYLE — a plain function given a context, its `cx.op(Host, .request,
+/// …)` a call that waits for the host's answer (the function on a thread of its own, parked while the host works)
+pub const Caller = struct {
+    pub const Effect = Host;
+    park: *Parked,
+    pub fn request(self: Caller, r: Host.Request) Host.Reply {
+        return self.park.ask(r);
+    }
+};
+
+/// the context a direct function is given: the host, and (by `cx.guard`, `cx.observe`) what it adds
+pub const Direct = ok.Context(struct { Caller }, @TypeOf(.{}), @TypeOf(.{}));
+
+/// A FUNCTION THE HOST CALLS IN DIRECT STYLE: its context, an arena for what it makes, its arguments; its value, or an
+/// error — `error.Condition` the host's condition (`call`), any other a condition by the error's name
+pub const DirectFn = *const fn (cx: Direct, a: Allocator, args: []const Value) anyerror!Value;
+
+pub const DirectEntry = struct { name: []const u8, function: DirectFn };
+
+/// the host's operation `name` from a direct function: its answer, or `error.Condition` (the host's, kept for the
+/// worker to send back)
+pub fn call(cx: anytype, name: []const u8, args: []const Value) error{Condition}!Value {
+    return switch (cx.op(Host, .request, .{ .name = name, .args = args })) {
+        .ok => |v| v,
+        .failed => |c| {
+            cx.of(Host).park.failure = c;
+            return error.Condition;
+        },
+    };
+}
+
+/// a direct function's thread and the worker, taking turns: one runs while the other waits on its event
+pub const Parked = struct {
+    io: std.Io,
+    arena: std.heap.ArenaAllocator,
+    thread: std.Thread = undefined,
+    /// the function's turn: the host's answer is in `reply`
+    go: std.Io.Event = .unset,
+    /// the worker's turn: the function's operation, value or failure is in `out`
+    back: std.Io.Event = .unset,
+    reply: Host.Reply = .{ .ok = .null },
+    out: Step = .{ .done = .null },
+    failure: ?Condition = null,
+    /// the host forgot the run: the function's waiting call answers `Forgotten`, so it unwinds and ends
+    forgotten: bool = false,
+    k: u64 = 0,
+    finished: bool = false,
+
+    fn ask(p: *Parked, r: Host.Request) Host.Reply {
+        if (p.forgotten) return .{ .failed = .{ .kind = "Forgotten", .message = "the host forgot this run" } };
+        p.go.reset();
+        p.out = .{ .perform = .{ .name = r.name, .args = r.args, .k = undefined } };
+        p.back.set(p.io);
+        p.go.waitUncancelable(p.io);
+        return p.reply;
+    }
+
+    fn body(p: *Parked, f: DirectFn, args: []const Value) void {
+        const cx: Direct = .{ .handlers = .{Caller{ .park = p }}, .observers = .{}, .guards = .{} };
+        p.out = if (f(cx, p.arena.allocator(), args)) |v| .{ .done = v } else |e| .{ .failed = if (e ==
+            error.Condition and p.failure != null) p.failure.? else .{ .kind = @errorName(e), .message = "" } };
+        p.finished = true;
+        p.back.set(p.io);
+    }
+
+    /// the function's next turn, given the host's answer (or nothing, to start it): what it did
+    fn turn(p: *Parked) Step {
+        p.back.waitUncancelable(p.io);
+        p.back.reset();
+        if (p.finished) p.thread.join();
+        return p.out;
+    }
+
+    fn start(gpa: Allocator, io: std.Io, f: DirectFn, args: []const Value) *Parked {
+        const p = gpa.create(Parked) catch oom();
+        p.* = .{ .io = io, .arena = .init(gpa) };
+        const own = p.arena.allocator().alloc(Value, args.len) catch oom();
+        for (args, own) |x, *y| y.* = clone(p.arena.allocator(), x) catch oom();
+        p.thread = std.Thread.spawn(.{}, body, .{ p, f, own }) catch @panic("okay-zig: no thread for a direct call");
+        return p;
+    }
+
+    fn give(p: *Parked, r: Host.Reply) Step {
+        p.reply = r;
+        p.go.set(p.io);
+        return p.turn();
+    }
+
+    /// the run dropped: a function still waiting told it was forgotten, and ended
+    fn drop(p: *Parked, gpa: Allocator) void {
+        if (!p.finished) {
+            p.forgotten = true;
+            while (!p.finished) _ = p.give(.{ .failed = .{ .kind = "Forgotten", .message = "the host forgot it" } });
+        }
+        p.arena.deinit();
+        gpa.destroy(p);
+    }
+};
+
+/// the host's answer in a `continue`: its value, or its condition — copied into `a`
+fn replyOf(a: Allocator, req: Value) Host.Reply {
+    if (field(req, "condition")) |c| if (c == .object) return .{ .failed = .{
+        .kind = a.dupe(u8, text(field(c, "kind")) orelse "Condition") catch oom(),
+        .message = a.dupe(u8, text(field(c, "message")) orelse "") catch oom(),
+    } };
+    return .{ .ok = incoming(a, field(req, "answer") orelse .null) catch oom() };
+}
+
 /// a run: its arena — the program, its rests, the answers it was given — dropped whole when the host forgets it
 const Run = struct {
     arena: std.heap.ArenaAllocator,
@@ -398,7 +508,11 @@ const Held = struct { arena: std.heap.ArenaAllocator, value: Value };
 pub const Worker = struct {
     gpa: Allocator,
     programs: []const Entry,
+    /// functions in direct style, each call on a thread of its own: `withDirect`
+    direct: []const DirectEntry = &.{},
+    io: ?std.Io = null,
     runs: std.AutoHashMapUnmanaged(u64, *Run) = .empty,
+    parked: std.AutoHashMapUnmanaged(u64, *Parked) = .empty,
     held: std.AutoHashMapUnmanaged(u64, *Held) = .empty,
     next_ref: u64 = 0,
 
@@ -406,7 +520,18 @@ pub const Worker = struct {
         return .{ .gpa = gpa, .programs = programs };
     }
 
+    /// the same worker serving `direct` functions too, their threads waiting by `io`
+    pub fn withDirect(w: Worker, io: std.Io, direct: []const DirectEntry) Worker {
+        var out = w;
+        out.io = io;
+        out.direct = direct;
+        return out;
+    }
+
     pub fn deinit(w: *Worker) void {
+        var parked = w.parked.valueIterator();
+        while (parked.next()) |p| p.*.drop(w.gpa);
+        w.parked.deinit(w.gpa);
         var runs = w.runs.valueIterator();
         while (runs.next()) |r| r.*.drop(w.gpa);
         w.runs.deinit(w.gpa);
@@ -427,6 +552,44 @@ pub const Worker = struct {
         const bare = if (std.mem.indexOfScalar(u8, name, ':')) |i| name[i + 1 ..] else name;
         for (w.programs) |e| if (std.mem.eql(u8, e.name, name) or std.mem.eql(u8, e.name, bare)) return e.program;
         return null;
+    }
+
+    /// a direct function by its name, or by `module:name`
+    pub fn findDirect(w: *const Worker, name: []const u8) ?DirectFn {
+        const bare = if (std.mem.indexOfScalar(u8, name, ':')) |i| name[i + 1 ..] else name;
+        for (w.direct) |e| if (std.mem.eql(u8, e.name, name) or std.mem.eql(u8, e.name, bare)) return e.function;
+        return null;
+    }
+
+    fn dropRun(w: *Worker, run: u64) void {
+        if (w.runs.fetchRemove(run)) |old| old.value.drop(w.gpa);
+        if (w.parked.fetchRemove(run)) |old| old.value.drop(w.gpa);
+    }
+
+    /// a direct function's step as the host reads it: its operation says `once` — a parked thread, continued once
+    fn directNode(w: *Worker, a: Allocator, run: u64, p: *Parked, step: Step) Answer {
+        switch (step) {
+            .perform => |o| {
+                p.k += 1;
+                return .{ .ok = object(a, .{
+                    .{ "perform", Value{ .string = a.dupe(u8, o.name) catch oom() } },
+                    .{ "args", outgoing(a, array(a, o.args)) catch oom() },
+                    .{ "k", Value{ .integer = @intCast(p.k) } },
+                    .{ "once", Value{ .bool = true } },
+                }) };
+            },
+            .done => |v| {
+                const out = object(a, .{.{ "done", outgoing(a, v) catch oom() }});
+                w.dropRun(run);
+                return .{ .ok = out };
+            },
+            .failed => |c| {
+                const out = Condition{ .kind = a.dupe(u8, c.kind) catch oom(), .message = a.dupe(u8, c.message) catch
+                    oom() };
+                w.dropRun(run);
+                return .{ .condition = out };
+            },
+        }
     }
 
     const Answer = union(enum) { ok: Value, condition: Condition };
@@ -464,8 +627,17 @@ pub const Worker = struct {
         if (std.mem.eql(u8, op, "program")) {
             const fn_ = text(field(req, "fn"));
             if (run == null or fn_ == null) return refuse("ValueError", "a program request names its run and its fn");
+            w.dropRun(run.?); // a run id used again: a new run
+            if (w.findDirect(fn_.?)) |f| {
+                var why: Condition = undefined;
+                var scratch = std.heap.ArenaAllocator.init(w.gpa);
+                defer scratch.deinit();
+                const args = w.argsOf(scratch.allocator(), req, &why) orelse return .{ .condition = why };
+                const parked = Parked.start(w.gpa, w.io.?, f, args);
+                w.parked.put(w.gpa, run.?, parked) catch oom();
+                return w.directNode(a, run.?, parked, parked.turn());
+            }
             const p = w.find(fn_.?) orelse return refuse("LookupError", "no program by that name in this worker");
-            if (w.runs.fetchRemove(run.?)) |old| old.value.drop(w.gpa); // a run id used again: a new run
             const r = Run.make(w.gpa);
             w.runs.put(w.gpa, run.?, r) catch oom();
             var why: Condition = undefined;
@@ -476,26 +648,40 @@ pub const Worker = struct {
         if (std.mem.eql(u8, op, "continue")) {
             const k = natural(field(req, "k"));
             if (run == null or k == null) return refuse("ValueError", "a continue names its run and its k");
+            if (w.parked.get(run.?)) |parked| {
+                if (k.? != parked.k) return refuse("LookupError", "a direct call's continuation is continued once");
+                return w.directNode(a, run.?, parked, parked.give(replyOf(parked.arena.allocator(), req)));
+            }
             const r = w.runs.get(run.?) orelse return refuse("LookupError", "no such run here (forgotten?)");
             const rest = r.rests.get(k.?) orelse
                 return refuse("LookupError", "that continuation is not held here (forgotten, or another process)");
-            const reply: Host.Reply = if (field(req, "condition")) |c| switch (c) {
-                .object => .{ .failed = .{
-                    .kind = r.b.arena.dupe(u8, text(field(c, "kind")) orelse "Condition") catch oom(),
-                    .message = r.b.arena.dupe(u8, text(field(c, "message")) orelse "") catch oom(),
-                } },
-                else => .{ .ok = incoming(r.b.arena, field(req, "answer") orelse .null) catch oom() },
-            } else .{ .ok = incoming(r.b.arena, field(req, "answer") orelse .null) catch oom() };
+            const reply = replyOf(r.b.arena, req);
             const resumed = ok.Resume(Host, Stepped){ .k = rest };
             return w.node(a, r, r.b.run(resumed.answer(&r.b, .request, reply)));
         }
         if (std.mem.eql(u8, op, "forget")) {
             if (run == null) return refuse("ValueError", "a forget names its run");
-            if (w.runs.fetchRemove(run.?)) |old| old.value.drop(w.gpa);
+            w.dropRun(run.?);
             return .{ .ok = .null };
         }
         if (std.mem.eql(u8, op, "call")) {
             const fn_ = text(field(req, "fn")) orelse return refuse("ValueError", "a call names its fn (by name)");
+            if (w.findDirect(fn_)) |f| {
+                var why: Condition = undefined;
+                var scratch = std.heap.ArenaAllocator.init(w.gpa);
+                defer scratch.deinit();
+                const args = w.argsOf(scratch.allocator(), req, &why) orelse return .{ .condition = why };
+                const parked = Parked.start(w.gpa, w.io.?, f, args);
+                defer parked.drop(w.gpa);
+                return switch (parked.turn()) {
+                    .done => |v| .{ .ok = outgoing(a, v) catch oom() },
+                    .perform => refuse("ValueError", "it calls the host: a call answers a value; run it as a program"),
+                    .failed => |c| .{ .condition = .{
+                        .kind = a.dupe(u8, c.kind) catch oom(),
+                        .message = a.dupe(u8, c.message) catch oom(),
+                    } },
+                };
+            }
             const p = w.find(fn_) orelse return refuse("LookupError", "no program by that name in this worker");
             const r = Run.make(w.gpa);
             defer r.drop(w.gpa);

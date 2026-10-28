@@ -74,7 +74,8 @@ Zig programs run under another language's handlers: `ok.wire` serves them to oka
 [okay's wire](https://github.com/okay-effects) — on a child's pipes (`zig build worker`: `zig-out/bin/zig-worker`) or
 in the host's own process through its C ABI (`zig-out/lib/libokay-zig-worker`). A program performs `Host` operations
 (`Host.call(b, R, "price_of", args)`) or a typed effect sent by `remote`; each goes to the host, which resumes the rest
-any number of times. `wire.guard(b, E, p, g)` puts a guard before them: a refused operation never reaches the host,
+any number of times. In DIRECT STYLE a plain function given a context calls the host and waits for the answer
+(`try wire.call(cx, "price_of", args)`), on a thread of its own. `wire.guard(b, E, p, g)` puts a guard before them: a refused operation never reaches the host,
 and the program fails with a condition named by the guard's error. okay's `WireConformance` passes (multi-shot across the link, typed callbacks under the host's
 `Reader`, tables, held values, failures by name): `conformance/TestZigLinks.scala`.
 

@@ -253,3 +253,70 @@ test "a guard on the wire: an allowed operation goes to the host; a refused one 
         try std.testing.expectEqualStrings(l[1], got);
     }
 }
+
+const conformance = @import("conformance");
+
+test "DIRECT STYLE: a plain function calls the host and waits; each operation `once`; forgotten mid-way" {
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    var w = ok.wire.Worker.init(gpa, &conformance.programs).withDirect(threaded.io(), &conformance.direct);
+    defer w.deinit();
+    const lines = [_][2][]const u8{
+        .{
+            \\{"id": 10, "op": "program", "run": 2, "fn": "t:quote", "args": ["tea", 3], "callbacks": ["price_of"]}
+            ,
+            \\{"id":10,"ok":{"perform":"price_of","args":["tea"],"k":1,"once":true}}
+        },
+        .{
+            \\{"id": 11, "op": "continue", "run": 2, "k": 1, "answer": {"t": "f", "v": 4}}
+            ,
+            \\{"id":11,"ok":{"perform":"discount","args":[{"t":"f","v":12}],"k":2,"once":true}}
+        },
+        .{
+            \\{"id": 12, "op": "continue", "run": 2, "k": 1, "answer": 5}
+            ,
+            \\{"id":12,"condition":{"kind":"LookupError","message":"a direct call's continuation is continued once"}}
+        },
+        .{
+            \\{"id": 13, "op": "continue", "run": 2, "k": 2, "answer": 6.5}
+            ,
+            \\{"id":13,"ok":{"done":6.5}}
+        },
+        .{
+            \\{"id": 14, "op": "program", "run": 3, "fn": "quote", "args": ["tea", 3]}
+            ,
+            \\{"id":14,"ok":{"perform":"price_of","args":["tea"],"k":1,"once":true}}
+        },
+        .{
+            \\{"id": 15, "op": "continue", "run": 3, "k": 1, "condition": {"kind": "KeyError", "message": "no tea"}}
+            ,
+            \\{"id":15,"condition":{"kind":"KeyError","message":"no tea"}}
+        },
+        .{
+            \\{"id": 16, "op": "program", "run": 4, "fn": "quote", "args": ["tea", 3]}
+            ,
+            \\{"id":16,"ok":{"perform":"price_of","args":["tea"],"k":1,"once":true}}
+        },
+        .{
+            \\{"id": 17, "op": "forget", "run": 4}
+            ,
+            \\{"id":17,"ok":null}
+        },
+        .{
+            \\{"id": 18, "op": "call", "fn": "quote", "args": [1]}
+            ,
+            \\{"id":18,"condition":{"kind":"ValueError","message":""}}
+        },
+    };
+    for (lines) |l| {
+        const got = w.serve1(l[0]);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings(l[1], got);
+    }
+    // a run left parked: the worker's deinit ends its thread
+    const left = w.serve1(
+        \\{"id": 19, "op": "program", "run": 5, "fn": "quote", "args": ["tea", 1]}
+    );
+    gpa.free(left);
+}
