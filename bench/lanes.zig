@@ -238,6 +238,22 @@ fn mGenerate() i64 {
     return b.run(b.handle(Yield, Loop.from(&b, .{ .i = 0, .n = opaque_(N) }), H{}));
 }
 
+// ------------------------------------------------------------------------------------------------ a context
+
+const Told = ok.effects.Writer(i64);
+
+/// 1000 values told through a context, kept in a list, summed (okay-goose's G:writer, okay-rust's T:writer)
+fn cxWriter() i64 {
+    _ = arena_state.reset(.retain_capacity);
+    var told: std.ArrayList(i64) = .empty;
+    const cx = ok.context(.{Told.Collect{ .told = &told, .arena = arena_state.allocator() }});
+    var i: i64 = 0;
+    while (i < opaque_(N)) : (i += 1) cx.op(Told, .tell, opaque_(i));
+    var s: i64 = 0;
+    for (told.items) |x| s += x;
+    return s;
+}
+
 // ------------------------------------------------------------------------------------------------ timing
 
 fn lane(io: std.Io, name: []const u8, f: *const fn () i64) void {
@@ -268,6 +284,7 @@ pub fn main(init: std.process.Init) void {
     defer arena_state.deinit();
     // the answers, checked
     const want = [_]i64{ N, 1, N * (N - 1) / 2 };
+    if (cxWriter() != N * (N - 1) / 2) @panic("writer");
     const rs_got = [_]i64{ rsChoose(), rsGeneral(), rsGenerate() };
     const m_got = [_]i64{ mChoose(), mGeneral(), mGenerate() };
     if (!std.mem.eql(i64, &want, &rs_got) or !std.mem.eql(i64, &want, &m_got)) {
@@ -280,4 +297,5 @@ pub fn main(init: std.process.Init) void {
     lane(init.io, "M:choose", mChoose);
     lane(init.io, "M:general", mGeneral);
     lane(init.io, "M:generate", mGenerate);
+    lane(init.io, "CX:writer", cxWriter);
 }
