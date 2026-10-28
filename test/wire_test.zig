@@ -256,11 +256,18 @@ test "a guard on the wire: an allowed operation goes to the host; a refused one 
 
 const conformance = @import("conformance");
 
-test "DIRECT STYLE: a plain function calls the host and waits; each operation `once`; forgotten mid-way" {
-    const gpa = std.testing.allocator;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
+test "DIRECT STYLE on threads (Io.Threaded): the host called and waited for; each operation `once`; forgotten" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
     defer threaded.deinit();
-    var w = ok.wire.Worker.init(gpa, &conformance.programs).withDirect(threaded.io(), &conformance.direct);
+    try directStyle(threaded.io());
+}
+
+// on fibers (`Io.Evented`) the same test, once Zig's evented Io compiles on this platform: in 0.17.0 neither
+// `Io.Dispatch` nor `Io.Kqueue` matches `Io.VTable` (Linux's `Io.Uring` is not tried here)
+
+fn directStyle(io: std.Io) !void {
+    const gpa = std.testing.allocator;
+    var w = ok.wire.Worker.init(gpa, &conformance.programs).withDirect(io, &conformance.direct);
     defer w.deinit();
     const lines = [_][2][]const u8{
         .{

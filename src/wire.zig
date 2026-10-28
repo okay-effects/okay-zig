@@ -393,23 +393,29 @@ pub const DirectFn = *const fn (cx: Direct, a: Allocator, args: []const Value) a
 
 pub const DirectEntry = struct { name: []const u8, function: DirectFn };
 
-/// the host's operation `name` from a direct function: its answer, or `error.Condition` (the host's, kept for the
-/// worker to send back)
-pub fn call(cx: anytype, name: []const u8, args: []const Value) error{Condition}!Value {
-    return switch (cx.op(Host, .request, .{ .name = name, .args = args })) {
+/// the host's operation `name` from a direct function: its answer; `error.Condition` the host's condition (kept, for
+/// the worker to send back); `error.Canceled` the run cancelled — the host forgot it — so the function unwinds
+pub fn call(cx: anytype, name: []const u8, args: []const Value) error{ Condition, Canceled }!Value {
+    const reply = cx.op(Host, .request, .{ .name = name, .args = args });
+    const park = cx.of(Host).park;
+    if (park.canceled) return error.Canceled;
+    return switch (reply) {
         .ok => |v| v,
         .failed => |c| {
-            cx.of(Host).park.failure = c;
+            park.failure = c;
             return error.Condition;
         },
     };
 }
 
-/// a direct function's thread and the worker, taking turns: one runs while the other waits on its event
+/// A DIRECT CALL IN FLIGHT: the function runs as a task of the worker's `Io` (`io.concurrent`) — a fiber with
+/// `Io.Evented`, a thread with `Io.Threaded`: the `Io` the worker is given chooses — and takes turns with the worker,
+/// one running while the other waits on its event. The host forgetting it is `Io`'s cancellation: the function's
+/// waiting call is a cancellation point
 pub const Parked = struct {
     io: std.Io,
     arena: std.heap.ArenaAllocator,
-    thread: std.Thread = undefined,
+    task: std.Io.Future(void) = undefined,
     /// the function's turn: the host's answer is in `reply`
     go: std.Io.Event = .unset,
     /// the worker's turn: the function's operation, value or failure is in `out`
@@ -417,17 +423,22 @@ pub const Parked = struct {
     reply: Host.Reply = .{ .ok = .null },
     out: Step = .{ .done = .null },
     failure: ?Condition = null,
-    /// the host forgot the run: the function's waiting call answers `Forgotten`, so it unwinds and ends
-    forgotten: bool = false,
+    /// cancelled: every call of the function answers at once, `error.Canceled` (`call`)
+    canceled: bool = false,
     k: u64 = 0,
     finished: bool = false,
 
+    const gone: Host.Reply = .{ .failed = .{ .kind = "Canceled", .message = "the host forgot this run" } };
+
     fn ask(p: *Parked, r: Host.Request) Host.Reply {
-        if (p.forgotten) return .{ .failed = .{ .kind = "Forgotten", .message = "the host forgot this run" } };
+        if (p.canceled) return gone;
         p.go.reset();
         p.out = .{ .perform = .{ .name = r.name, .args = r.args, .k = undefined } };
         p.back.set(p.io);
-        p.go.waitUncancelable(p.io);
+        p.go.wait(p.io) catch {
+            p.canceled = true;
+            return gone;
+        };
         return p.reply;
     }
 
@@ -439,20 +450,25 @@ pub const Parked = struct {
         p.back.set(p.io);
     }
 
-    /// the function's next turn, given the host's answer (or nothing, to start it): what it did
+    /// the function's next turn: what it did — an operation, its value, its failure
     fn turn(p: *Parked) Step {
         p.back.waitUncancelable(p.io);
         p.back.reset();
-        if (p.finished) p.thread.join();
+        if (p.finished) p.task.await(p.io);
         return p.out;
     }
 
-    fn start(gpa: Allocator, io: std.Io, f: DirectFn, args: []const Value) *Parked {
+    /// the function started, as a task of `io`: null if `io` runs nothing concurrently
+    fn start(gpa: Allocator, io: std.Io, f: DirectFn, args: []const Value) ?*Parked {
         const p = gpa.create(Parked) catch oom();
         p.* = .{ .io = io, .arena = .init(gpa) };
         const own = p.arena.allocator().alloc(Value, args.len) catch oom();
         for (args, own) |x, *y| y.* = clone(p.arena.allocator(), x) catch oom();
-        p.thread = std.Thread.spawn(.{}, body, .{ p, f, own }) catch @panic("okay-zig: no thread for a direct call");
+        p.task = io.concurrent(body, .{ p, f, own }) catch {
+            p.arena.deinit();
+            gpa.destroy(p);
+            return null;
+        };
         return p;
     }
 
@@ -462,12 +478,9 @@ pub const Parked = struct {
         return p.turn();
     }
 
-    /// the run dropped: a function still waiting told it was forgotten, and ended
+    /// the run dropped: a function still waiting cancelled (`Io`'s cancellation), and awaited
     fn drop(p: *Parked, gpa: Allocator) void {
-        if (!p.finished) {
-            p.forgotten = true;
-            while (!p.finished) _ = p.give(.{ .failed = .{ .kind = "Forgotten", .message = "the host forgot it" } });
-        }
+        if (!p.finished) p.task.cancel(p.io);
         p.arena.deinit();
         gpa.destroy(p);
     }
@@ -594,6 +607,10 @@ pub const Worker = struct {
 
     const Answer = union(enum) { ok: Value, condition: Condition };
 
+    fn noConcurrency() Answer {
+        return refuse("RuntimeError", "this worker's Io runs nothing concurrently: no direct style");
+    }
+
     fn refuse(kind: []const u8, message: []const u8) Answer {
         return .{ .condition = .{ .kind = kind, .message = message } };
     }
@@ -633,7 +650,7 @@ pub const Worker = struct {
                 var scratch = std.heap.ArenaAllocator.init(w.gpa);
                 defer scratch.deinit();
                 const args = w.argsOf(scratch.allocator(), req, &why) orelse return .{ .condition = why };
-                const parked = Parked.start(w.gpa, w.io.?, f, args);
+                const parked = Parked.start(w.gpa, w.io.?, f, args) orelse return noConcurrency();
                 w.parked.put(w.gpa, run.?, parked) catch oom();
                 return w.directNode(a, run.?, parked, parked.turn());
             }
@@ -671,7 +688,7 @@ pub const Worker = struct {
                 var scratch = std.heap.ArenaAllocator.init(w.gpa);
                 defer scratch.deinit();
                 const args = w.argsOf(scratch.allocator(), req, &why) orelse return .{ .condition = why };
-                const parked = Parked.start(w.gpa, w.io.?, f, args);
+                const parked = Parked.start(w.gpa, w.io.?, f, args) orelse return noConcurrency();
                 defer parked.drop(w.gpa);
                 return switch (parked.turn()) {
                     .done => |v| .{ .ok = outgoing(a, v) catch oom() },

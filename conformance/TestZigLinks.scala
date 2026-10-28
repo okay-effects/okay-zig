@@ -17,7 +17,7 @@ import okay.foreign.{ForeignWorker, WireConformance}
  * The conformance tests are tagged `Live`, which okay's build excludes by default: hence the `set`.
  *
  * The worker's directory is OKAY_ZIG, by default ~/work/my/okay-zig. Programs as data and direct style (each call a
- * thread of its own, parked while the host works); no streams (a muxed worker's): those tests are skipped.
+ * task of the worker's Io, waiting while the host works); no streams (a muxed worker's): those tests are skipped.
  */
 object ZigWorker:
   val dir: Path = Paths.get(sys.env.getOrElse("OKAY_ZIG", sys.props("user.home") + "/work/my/okay-zig"))

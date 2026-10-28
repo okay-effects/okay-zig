@@ -131,16 +131,19 @@ itself: the far side's own policy over what it asks of the host.
 
 ## Direct style on the wire (2026-10-28)
 
-The contexts layer, served: a DIRECT function is `fn (cx: wire.Direct, a: Allocator, args) !Value` — a plain
-function, its host a context's handler (`Caller`), `wire.call(cx, "price_of", args)` a call that WAITS for the host's
-answer. Each run is a thread of its own (`Parked`), taking turns with the worker by two `Io.Event`s: the function runs
-until it calls the host, then the worker sends `perform` with `"once": true`, and `continue` gives the answer back —
-once (a stack cannot be copied: a second `continue` of a `k` is a `LookupError`). A host's condition is
+The contexts layer, served: a DIRECT function is `fn (cx: wire.Direct, a: Allocator, args) !Value` — a plain function,
+its host a context's handler (`Caller`), `wire.call(cx, "price_of", args)` a call that WAITS for the host's answer. Each
+run is a TASK OF THE WORKER'S `Io` (`io.concurrent`): the `Io` the worker is given decides — a thread with
+`Io.Threaded`, a fiber with `Io.Evented` — and the task takes turns with the worker by two `Io.Event`s: the function
+runs until it calls the host, then the worker sends `perform` with `"once": true`, and `continue` gives the answer back
+— once (a stack cannot be copied: a second `continue` of a `k` is a `LookupError`). A host's condition is
 `error.Condition` in the function (the condition kept, sent back if it escapes); any other error a condition by its
-name. `forget` of a waiting run answers its call `Forgotten`, so it unwinds and its thread ends. `cx.guard` and
-`cx.observe` work in it as in any context. `Worker.withDirect(io, entries)`; the stdio worker uses `init.io`, the
-library its own `Io.Threaded`. okay's `WireConformance` DIRECT STYLE passes over pipes and FFM: 14 passed, only
-streams and mux skipped.
+name. `forget` of a waiting run is `Io`'s CANCELLATION (`Future.cancel`): the function's waiting call is a cancellation
+point, `wire.call` answers `error.Canceled` (and every later call too), so it unwinds; the task is awaited. An `Io` that
+runs nothing concurrently refuses direct calls (`RuntimeError`). Fibers are not checked yet: in Zig 0.17.0 the evented
+`Io`s of macOS (`Io.Dispatch`, `Io.Kqueue`) do not compile against `Io.VTable`. `cx.guard` and `cx.observe` work in it
+as in any context. `Worker.withDirect(io, entries)`; the stdio worker uses `init.io`, the library its own `Io.Threaded`.
+okay's `WireConformance` DIRECT STYLE passes over pipes and FFM: 14 passed, only streams and mux skipped.
 
 ## Next
 
