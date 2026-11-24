@@ -14,7 +14,7 @@ const std = @import("std");
 const ok = @import("okay.zig");
 const Allocator = std.mem.Allocator;
 const Build = ok.Build;
-const Eff = ok.Eff;
+const Comp = ok.Comp;
 
 pub const Value = std.json.Value;
 
@@ -38,9 +38,9 @@ pub const Host = struct {
     }
 
     /// the host's operation `name`, its answer the program's value; the host's condition the program's failure
-    pub fn call(b: *Build, comptime R: anytype, name: []const u8, args: []const Value) Eff(Value, R) {
+    pub fn call(b: *Build, comptime R: anytype, name: []const u8, args: []const Value) Comp(Value, R) {
         const Steps = struct {
-            fn answered(bb: *Build, r: Reply) Eff(Value, R) {
+            fn answered(bb: *Build, r: Reply) Comp(Value, R) {
                 return switch (r) {
                     .ok => |v| bb.pure(Value, R, v),
                     .failed => |c| fail(bb, Value, R, c.kind, c.message),
@@ -51,7 +51,7 @@ pub const Host = struct {
     }
 
     /// a program that fails with a condition by name: any value type
-    pub fn fail(b: *Build, comptime A: type, comptime R: anytype, kind: []const u8, message: []const u8) Eff(A, R) {
+    pub fn fail(b: *Build, comptime A: type, comptime R: anytype, kind: []const u8, message: []const u8) Comp(A, R) {
         return ok.never(A, b.perform(R, Host, .fail, .{ .kind = kind, .message = message }));
     }
 };
@@ -293,7 +293,7 @@ fn arguments(a: Allocator, payload: anytype) []const Value {
 pub fn remote(b: *Build, comptime E: type, p: anytype) ok.Handled(@TypeOf(p), E, @TypeOf(p).Value) {
     const P = @TypeOf(p);
     const Rest = P.Effects.without(P.Effects.place(E));
-    const Out = Eff(P.Value, Rest);
+    const Out = Comp(P.Value, Rest);
     const K = ok.Resume(E, Out);
     const H = struct {
         pub fn ret(_: @This(), bb: *Build, a: P.Value) Out {
@@ -425,7 +425,7 @@ const Step = union(enum) {
     perform: struct { name: []const u8, args: []const Value, k: *const ok.Captured },
     failed: Condition,
 };
-const Stepped = Eff(Step, ok.Pure);
+const Stepped = Comp(Step, ok.Pure);
 
 const Stepping = struct {
     pub fn ret(_: Stepping, b: *Build, v: Value) Stepped {

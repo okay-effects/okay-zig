@@ -1,7 +1,7 @@
 //! okay-zig: algebraic effects and handlers for Zig, okay-scala's design (specs/design.md).
 //!
 //! A program is DATA — a value, an operation, a bind, a handler around a program, a resumption — and its type
-//! `Eff(A, R)` says its value `A` and its effects, the ROW `R`, at compile time. An effect is in a row at a PLACE the
+//! `Comp(A, R)` says its value `A` and its effects, the ROW `R`, at compile time. An effect is in a row at a PLACE the
 //! compiler computes (`Row.place`); one missing is a compile error naming both. A handler takes its effect out of the
 //! row: `handle` (the rest of the program `k` given, resumed once, twice, or never) and `handleTail` (the answer given
 //! in place, no `k` taken). One machine runs them, a CEK machine whose continuation is an immutable stack in an arena:
@@ -36,7 +36,7 @@ pub fn Row(comptime members: anytype) type {
 
         /// a program of this row, its value `A`: `R.Of(u32)` is `u32 ! R`
         pub fn Of(comptime A: type) type {
-            return Eff(A, @This());
+            return Comp(A, @This());
         }
 
         /// whether `E` is in the row
@@ -329,7 +329,7 @@ pub const Build = struct {
     // -------------------------------------------------------------------------------------------- the words
 
     /// `a`, a program of row `R` with no operation
-    pub fn pure(b: *Build, comptime A: type, comptime R: anytype, a: A) Eff(A, R) {
+    pub fn pure(b: *Build, comptime A: type, comptime R: anytype, a: A) Comp(A, R) {
         return .{ .node = b.valueNode(Val.put(b.arena, A, a)) };
     }
 
@@ -340,7 +340,7 @@ pub const Build = struct {
         comptime E: type,
         comptime tag: std.meta.Tag(E.Op),
         payload: @FieldType(E.Op, @tagName(tag)),
-    ) Eff(E.Answer(tag), R) {
+    ) Comp(E.Answer(tag), R) {
         const place = comptime rowOf(R).place(E);
         const op = @unionInit(E.Op, @tagName(tag), payload);
         return .{ .node = b.node(.{ .perform = .{ .place = place, .op = Val.put(b.arena, E.Op, op) } }) };
@@ -362,7 +362,7 @@ pub const Build = struct {
     }
 
     /// `p`'s value through `f(ctx, it)`
-    pub fn map(b: *Build, p: anytype, ctx: anytype, comptime f: anytype) Eff(ReturnOfPlain(f), @TypeOf(p).Effects) {
+    pub fn map(b: *Build, p: anytype, ctx: anytype, comptime f: anytype) Comp(ReturnOfPlain(f), @TypeOf(p).Effects) {
         const P = @TypeOf(p);
         const Ctx = @TypeOf(ctx);
         const B = ReturnOfPlain(f);
@@ -498,10 +498,14 @@ pub const Build = struct {
 };
 
 /// A PROGRAM: its value `A`, its effects the row `R` (a `Row`, or a tuple of effects) — `A ! R`
-pub fn Eff(comptime A: type, comptime R: anytype) type {
-    return EffOf(A, rowOf(R)); // `.{ F, G }` and `Row(.{ F, G })`: one type
+pub fn Comp(comptime A: type, comptime R: anytype) type {
+    return CompOf(A, rowOf(R)); // `.{ F, G }` and `Row(.{ F, G })`: one type
 }
-fn EffOf(comptime A: type, comptime R: type) type {
+
+/// deprecated: the old name of `Comp`
+pub const Eff = Comp;
+
+fn CompOf(comptime A: type, comptime R: type) type {
     return struct {
         node: *Node,
         pub const Value = A;
@@ -511,7 +515,7 @@ fn EffOf(comptime A: type, comptime R: type) type {
 
 /// what a program `P` is with `E` handled, its value `B`: its row without `E`
 pub fn Handled(comptime P: type, comptime E: type, comptime B: type) type {
-    return Eff(B, P.Effects.without(P.Effects.place(E)));
+    return Comp(B, P.Effects.without(P.Effects.place(E)));
 }
 
 /// the rest of a program, given to a handler's operation clause: resumed with the operation's answer
@@ -534,7 +538,7 @@ fn ReturnOfPlain(comptime f: anytype) type {
 }
 
 /// a program whose value never comes (its operation is never answered): any value type
-pub fn never(comptime A: type, p: anytype) Eff(A, @TypeOf(p).Effects) {
+pub fn never(comptime A: type, p: anytype) Comp(A, @TypeOf(p).Effects) {
     return .{ .node = p.node };
 }
 fn HandledBy(comptime H: type) type {

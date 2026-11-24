@@ -37,7 +37,7 @@ const Shop = struct {
 };
 
 /// `price_of(sku)`, then `discount(price * qty)`: typed here, sent by `remote`
-fn totalOf(b: *Build, sku: []const u8, qty: f64) ok.Eff(f64, .{ Shop, Host }) {
+fn totalOf(b: *Build, sku: []const u8, qty: f64) ok.Comp(f64, .{ Shop, Host }) {
     const Rs = ok.Row(.{ Shop, Host });
     const S = struct {
         fn priced(q: f64, bb: *Build, price: f64) Rs.Of(f64) {

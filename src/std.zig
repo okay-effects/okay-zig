@@ -1,10 +1,10 @@
-//! THE STANDARD EFFECTS: State, Reader, Writer, Fail, Choose — each its operations (`Op`, a tagged union), the type
+//! THE STANDARD EFFECTS: State, Reader, Writer, Throws, Choose — each its operations (`Op`, a tagged union), the type
 //! of each one's answer (`Answer`), its words, and its handlers.
 
 const std = @import("std");
 const ok = @import("okay.zig");
 const Build = ok.Build;
-const Eff = ok.Eff;
+const Comp = ok.Comp;
 
 /// a state `S`: `get`, `put`
 pub fn State(comptime S: type) type {
@@ -17,10 +17,10 @@ pub fn State(comptime S: type) type {
                 .put => void,
             };
         }
-        pub fn get(b: *Build, comptime R: anytype) Eff(S, R) {
+        pub fn get(b: *Build, comptime R: anytype) Comp(S, R) {
             return b.perform(R, Self, .get, {});
         }
-        pub fn put(b: *Build, comptime R: anytype, s: S) Eff(void, R) {
+        pub fn put(b: *Build, comptime R: anytype, s: S) Comp(void, R) {
             return b.perform(R, Self, .put, s);
         }
         /// in place: the state in a cell the caller holds
@@ -51,7 +51,7 @@ pub fn Reader(comptime E: type) type {
                 .ask => E,
             };
         }
-        pub fn ask(b: *Build, comptime R: anytype) Eff(E, R) {
+        pub fn ask(b: *Build, comptime R: anytype) Comp(E, R) {
             return b.perform(R, Self, .ask, {});
         }
         pub const Given = struct {
@@ -77,7 +77,7 @@ pub fn Writer(comptime W: type) type {
                 .tell => void,
             };
         }
-        pub fn tell(b: *Build, comptime R: anytype, w: W) Eff(void, R) {
+        pub fn tell(b: *Build, comptime R: anytype, w: W) Comp(void, R) {
             return b.perform(R, Self, .tell, w);
         }
         /// in place: what is told appended to a list in the build's arena
@@ -95,7 +95,7 @@ pub fn Writer(comptime W: type) type {
 }
 
 /// a failure `E`: `raise` — the rest of the program dropped
-pub fn Fail(comptime E: type) type {
+pub fn Throws(comptime E: type) type {
     return struct {
         const Self = @This();
         pub const Op = union(enum) { raise: E };
@@ -105,7 +105,7 @@ pub fn Fail(comptime E: type) type {
             };
         }
         /// a program of any value that never gives it: `e` raised
-        pub fn raise(b: *Build, comptime A: type, comptime R: anytype, e: E) Eff(A, R) {
+        pub fn raise(b: *Build, comptime A: type, comptime R: anytype, e: E) Comp(A, R) {
             return ok.never(A, b.perform(R, Self, .raise, e));
         }
         pub fn Result(comptime A: type) type {
@@ -115,7 +115,7 @@ pub fn Fail(comptime E: type) type {
         pub fn attempt(b: *Build, p: anytype) ok.Handled(@TypeOf(p), Self, Result(@TypeOf(p).Value)) {
             const P = @TypeOf(p);
             const Rest = P.Effects.without(P.Effects.place(Self));
-            const Out = Eff(Result(P.Value), Rest);
+            const Out = Comp(Result(P.Value), Rest);
             const H = struct {
                 pub fn ret(_: @This(), bb: *Build, a: P.Value) Out {
                     return bb.pure(Result(P.Value), Rest, .{ .value = a });
@@ -131,6 +131,9 @@ pub fn Fail(comptime E: type) type {
     };
 }
 
+/// deprecated: the old name of `Throws`
+pub const Fail = Throws;
+
 /// a choice of two: `flip` — a handler may answer it both ways
 pub const Choose = struct {
     const Self = @This();
@@ -140,7 +143,7 @@ pub const Choose = struct {
             .flip => bool,
         };
     }
-    pub fn flip(b: *Build, comptime R: anytype) Eff(bool, R) {
+    pub fn flip(b: *Build, comptime R: anytype) Comp(bool, R) {
         return b.perform(R, Self, .flip, {});
     }
     /// EVERY value the program can give: each flip answered true, then the same rest answered false — `k` resumed
@@ -149,7 +152,7 @@ pub const Choose = struct {
         const P = @TypeOf(p);
         const A = P.Value;
         const Rest = P.Effects.without(P.Effects.place(Self));
-        const Out = Eff([]const A, Rest);
+        const Out = Comp([]const A, Rest);
         const H = struct {
             pub fn ret(_: @This(), bb: *Build, a: A) Out {
                 const one = bb.arena.alloc(A, 1) catch @panic("okay-zig: out of memory");

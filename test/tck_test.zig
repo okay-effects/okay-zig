@@ -102,7 +102,9 @@ fn random(a: std.mem.Allocator, r: *JRandom, depth: i32) *const T {
 }
 
 /// one row with every effect, each twice
-const R = ok.Row(.{ S.Choose, S.Fail(i64), S.Fail(i32), S.State(i64), S.State(i32), S.Writer(i64), S.Writer(i32) });
+const R = ok.Row(.{
+    S.Choose, S.Throws(i64), S.Throws(i32), S.State(i64), S.State(i32), S.Writer(i64), S.Writer(i32),
+});
 const P = R.Of(i32);
 
 fn wide(comptime X: type, n: i32) X {
@@ -123,7 +125,7 @@ fn build(b: *Build, t: *const T) P {
                 return bb.pure(i32, R, if (first) xs[0] else xs[1]);
             }
         }.pick),
-        .raise => |x| if (x[0] == 0) S.Fail(i64).raise(b, i32, R, x[1]) else S.Fail(i32).raise(b, i32, R, x[1]),
+        .raise => |x| if (x[0] == 0) S.Throws(i64).raise(b, i32, R, x[1]) else S.Throws(i32).raise(b, i32, R, x[1]),
         .seq => |x| b.then(build(b, x[0]), x[1], struct {
             fn f(rest: *const T, bb: *Build, _: i32) P {
                 return build(bb, rest);
@@ -195,7 +197,7 @@ fn cell(b: *Build, comptime X: type, s0: i32, body: P) P {
 }
 
 fn either(b: *Build, comptime X: type, body: P) P {
-    const E = S.Fail(X);
+    const E = S.Throws(X);
     const H = struct {
         pub fn ret(_: @This(), bb: *Build, v: i32) P {
             return bb.pure(i32, R, v);
@@ -272,8 +274,8 @@ fn closed(b: *Build, p: P) i32 {
     const p2 = b.handleTail(S.Writer(i64), p1, Tell{});
     const p3 = b.handleTail(S.State(i32), p2, Cell32{});
     const p4 = b.handleTail(S.State(i64), p3, Cell{});
-    const p5 = b.handleTail(S.Fail(i32), p4, Raise{});
-    const p6 = b.handleTail(S.Fail(i64), p5, Raise{});
+    const p5 = b.handleTail(S.Throws(i32), p4, Raise{});
+    const p6 = b.handleTail(S.Throws(i64), p5, Raise{});
     return b.run(b.handleTail(S.Choose, p6, Flip{}));
 }
 

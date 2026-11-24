@@ -53,7 +53,7 @@ var cell: u32 = 40;
 const v = b.run(Counter.inCell(&b, Reader.given(&b, tick(&b, R), "Ann"), &cell));
 ```
 
-- A ROW is a tuple of effect types: `Row(.{ F, G })`, `R.with(E)` (`R + E`); `R.Of(A)` — or `Eff(A, .{ F, G })` —
+- A ROW is a tuple of effect types: `Row(.{ F, G })`, `R.with(E)` (`R + E`); `R.Of(A)` — or `Comp(A, .{ F, G })` —
   is `A ! R`. Zig has no infix types: a type is a call the compiler evaluates.
 - An effect is a type with its operations (`Op`, a tagged union) and the type of each one's answer (`Answer`).
 - `b.perform(R, E, .tag, payload)` is an operation; `E` not in `R` is a compile error:
@@ -63,7 +63,7 @@ const v = b.run(Counter.inCell(&b, Reader.given(&b, tick(&b, R), "Ann"), &cell))
   answer in place.
 - STEPS instead of closures: `b.next(p, f)`, `b.chain(p, .{ double, save })`, `b.seq(.{ p, q, r })` — each step a
   function `fn (*Build, A) R.Of(B)` declared once and named; `b.then(p, ctx, f)` when a step must hold a value.
-- Standard effects: `State`, `Reader`, `Writer`, `Fail`, `Choose`.
+- Standard effects: `State`, `Reader`, `Writer`, `Throws`, `Choose`.
 - MEMORY: a run consumes its program — each node freed as soon as it is read, frames reused — so a loop runs in the
   memory of one turn (a million operations: 4 nodes, 3 frames). `b.share(p)` keeps a program for another run or for
   a second place; a program run twice unshared is a panic in Debug builds, saying so.

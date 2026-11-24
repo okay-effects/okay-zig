@@ -1,16 +1,16 @@
 # okay-zig — design (spec, 2026-10-28)
 
 Status 2026-10-28: both layers built. The machine — rows, typed places, `handle` and `handleTail`, State, Reader,
-Writer, Fail, Choose; memory a loop's turn, not its length; steps (`next`, `chain`, `seq`). Contexts — `context`, `op`,
-`needs`, `observe`, `guard`. okay's wire: a worker on pipes and on okay's C ABI, okay's `WireConformance` passed; a
-guard on the wire; direct style, mux and streams on the wire (okay's conformance: all over pipes). okay-kernel's TCK
+Writer, Throws, Choose; memory a loop's turn, not its length; steps (`next`, `chain`, `seq`). Contexts —
+`context`, `op`, `needs`, `observe`, `guard`. okay's wire: a worker on pipes and on okay's C ABI, okay's
+`WireConformance` passed; a guard on the wire; direct style, mux and streams on the wire (okay's conformance: all over pipes). okay-kernel's TCK
 digest: the family's. 25 tests, in Debug and ReleaseSafe.
 
 ## Why it fits Zig
 
 Zig has no closures, no garbage collector and no custom operators — and has `comptime`, where types are values. So:
 
-- A ROW is a tuple of types, `Row(.{ F, G })`; `R.with(E)` is `R + E`; `Eff(A, R)` is `A ! R`. There is no infix
+- A ROW is a tuple of types, `Row(.{ F, G })`; `R.with(E)` is `R + E`; `Comp(A, R)` is `A ! R`. There is no infix
   type: the notation is a call evaluated by the compiler.
 - `In[E, R]` is `R.place(E)`, computed at compile time: the place an index, its check a `@compileError` naming the
   effect and the row. A handler's row is `R.without(place)`.
@@ -82,7 +82,7 @@ cost of the variable; left alone, the compiler folds a million ticks into one ad
 - Several guards of one effect: each asked in order, the first error refuses; their errors one set (`Cx.Refusal(E)`).
 - Order: observers see the operation, then guards decide, then the handler answers — the audit sees the refused ones
   too; a refused operation is never answered.
-- Contexts only: a guard in the machine is a handler around the effect that answers or fails (`Fail`) — written
+- Contexts only: a guard in the machine is a handler around the effect that answers or fails (`Throws`) — written
   with `handle` already.
 
 ## okay's wire (2026-10-28)

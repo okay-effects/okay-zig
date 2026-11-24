@@ -2,7 +2,7 @@ const std = @import("std");
 const ok = @import("okay");
 const S = ok.effects;
 const Build = ok.Build;
-const Eff = ok.Eff;
+const Comp = ok.Comp;
 const t = std.testing;
 
 const Counter = S.State(u32);
@@ -42,7 +42,7 @@ test "two effects, one row, handled in either order; a row written as R.with(E)"
     var b = Build{ .arena = a.allocator() };
     const R = ok.Row(.{Name}).with(Counter); // Name + Counter
     const p = b.then(Name.ask(&b, R), {}, struct {
-        fn f(_: void, bb: *Build, who: []const u8) Eff(usize, R) {
+        fn f(_: void, bb: *Build, who: []const u8) Comp(usize, R) {
             return bb.map(tick(bb, R), who.len, struct {
                 fn g(len: usize, n: u32) usize {
                     return len * 100 + n;
@@ -61,11 +61,11 @@ test "fail: the rest dropped, the failure the value; what was done before it sta
     var a = arena();
     defer a.deinit();
     var b = Build{ .arena = a.allocator() };
-    const Err = S.Fail([]const u8);
+    const Err = S.Throws([]const u8);
     const R = ok.Row(.{ Counter, Err });
     var cell: u32 = 0;
     const p = b.andThen(tick(&b, R), b.then(Err.raise(&b, u32, R, "no"), {}, struct {
-        fn f(_: void, bb: *Build, x: u32) Eff(u32, R) {
+        fn f(_: void, bb: *Build, x: u32) Comp(u32, R) {
             return bb.andThen(Counter.put(bb, R, 999), bb.pure(u32, R, x));
         }
     }.f));
@@ -80,7 +80,7 @@ test "choose: the rest resumed twice — every value, in order" {
     var b = Build{ .arena = a.allocator() };
     const R = ok.Row(.{S.Choose});
     const p = b.then(S.Choose.flip(&b, R), {}, struct {
-        fn f(_: void, bb: *Build, x: bool) Eff(u8, R) {
+        fn f(_: void, bb: *Build, x: bool) Comp(u8, R) {
             return bb.map(S.Choose.flip(bb, R), x, struct {
                 fn g(first: bool, second: bool) u8 {
                     return @as(u8, if (first) 2 else 0) + @as(u8, if (second) 1 else 0);
@@ -97,7 +97,7 @@ test "choose under state: the cell is one, the choices many — handled outside 
     var b = Build{ .arena = a.allocator() };
     const R = ok.Row(.{ Counter, S.Choose });
     const p = b.then(S.Choose.flip(&b, R), {}, struct {
-        fn f(_: void, bb: *Build, x: bool) Eff(u32, R) {
+        fn f(_: void, bb: *Build, x: bool) Comp(u32, R) {
             return bb.map(tick(bb, R), x, struct {
                 fn g(first: bool, n: u32) u32 {
                     return if (first) n + 100 else n;
@@ -198,4 +198,9 @@ test "intercept: a handler that keeps the row — the operations inside to it, t
     _ = b.run(Name.given(&b, Counter.inCell(&b, p, &outer), "x"));
     try t.expectEqual(7, inner);
     try t.expectEqual(9, outer);
+}
+
+test "the old names (deprecated) are the new ones" {
+    try t.expect(ok.Eff(u32, ok.Pure) == Comp(u32, ok.Pure));
+    try t.expect(S.Fail(u8) == S.Throws(u8));
 }

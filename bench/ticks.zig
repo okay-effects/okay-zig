@@ -2,19 +2,19 @@ const std = @import("std");
 const ok = @import("okay");
 const Counter = ok.effects.State(u32);
 const Build = ok.Build;
-const Eff = ok.Eff;
+const Comp = ok.Comp;
 
-fn tick(b: *Build, comptime R: anytype) Eff(u32, R) {
+fn tick(b: *Build, comptime R: anytype) Comp(u32, R) {
     return b.then(Counter.get(b, R), {}, struct {
-        fn f(_: void, bb: *Build, n: u32) Eff(u32, R) {
+        fn f(_: void, bb: *Build, n: u32) Comp(u32, R) {
             return bb.andThen(Counter.put(bb, R, n + 1), bb.pure(u32, R, n));
         }
     }.f);
 }
-fn loop(b: *Build, comptime R: anytype, n: u32) Eff(u32, R) {
+fn loop(b: *Build, comptime R: anytype, n: u32) Comp(u32, R) {
     if (n == 0) return Counter.get(b, R);
     return b.then(tick(b, R), n, struct {
-        fn f(m: u32, bb: *Build, _: u32) Eff(u32, R) {
+        fn f(m: u32, bb: *Build, _: u32) Comp(u32, R) {
             return loop(bb, R, m - 1);
         }
     }.f);
